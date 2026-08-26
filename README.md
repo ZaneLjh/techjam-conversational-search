@@ -34,7 +34,8 @@ Verify the downloaded file using the published `SHA256SUMS` file.
 
 ## Run the Starter
 
-Python 3.10 or later is recommended. The starter uses only the Python standard library.
+Python 3.10 or later is required for E2. The agent uses only the Python standard
+library, so there is no dependency-install step.
 
 ```bash
 python3 -m evaluator.local_evaluator
@@ -45,6 +46,46 @@ The command writes per-session results and aggregate metrics to `results.json`.
 
 The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
 MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
+
+## Current solution: E2 constraint ledger
+
+This branch implements E2 as an offline, standard-library-only retrieval agent.
+It replaces append-only conversation text with a typed constraint ledger that
+tracks facet, strength (`MUST`, `SHOULD`, `AVOID`, `NO_PREFERENCE`), polarity,
+source turn, status, and supersession history. Deterministic parsing handles
+clarifications, explicit boundaries, negations, and intent corrections. Only
+active positive constraints enter the BM25 query; active exclusions filter
+matching candidates. Continued turns explore deeper unseen results, and an
+intent override opens a new candidate epoch.
+
+The catalog, evaluator, FTS5 fields, BM25 weights, and question schedule remain
+unchanged from E1. E2 makes no network calls and reports zero model tokens.
+It uses no model or API, so estimated model/API cost is `$0`.
+
+| Metric | E1 | E2 |
+| --- | ---: | ---: |
+| Hit Rate@10 | 0.865000 | 0.985000 |
+| MRR | 0.522867 | 0.594141 |
+| MTTC | 4.320000 | 3.170000 |
+| Efficiency | 0.668000 | 0.783000 |
+| TechnicalScore | 0.722960 | 0.827342 |
+
+Reproduce the implementation evidence from the repository root:
+
+```bash
+python -m unittest discover -v
+python -m evaluator.local_evaluator --output results/e2_structured_constraint_ledger.json
+python -m tools.evaluate_variant --disable-candidate-exploration \
+  --output results/e2a_ledger_only.json
+python -m tools.fold_report \
+  --baseline results/e1_stateful_lexical.json \
+  --candidate results/e2_structured_constraint_ledger.json \
+  --folds 5 --output results/e2_five_fold_report.json
+python -m tools.benchmark_agent --output results/e2_benchmark.json
+```
+
+See `docs/experiments.md` for the controlled ablation and limitations, and
+`docs/e2_review_guide.md` for the review upload manifest.
 
 ## Agent Interface
 
@@ -93,8 +134,12 @@ docs/competition_specification.md participant rules and evaluation protocol
 docs/agent_api_contract.json      machine-readable Agent contract
 docs/evaluation_config.json       scoring configuration
 docs/baseline_results.json        reproducible weak-starter reference score
-starter/agent.py                  editable weak starter
+starter/agent.py                  E2 retrieval agent and session state
+starter/constraints.py            typed constraint parser and ledger
 evaluator/local_evaluator.py      public-set simulator and scorer
+tools/evaluate_variant.py         declared E2 ablation runner
+tools/fold_report.py              scenario-stratified stability report
+tools/benchmark_agent.py          latency and resource benchmark
 ```
 
 ## Judging and Submission Policy
