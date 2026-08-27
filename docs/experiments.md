@@ -204,3 +204,145 @@ A demonstrated three-turn correction session is recorded in
 `docs/e2_demo_session.md`. Team names and contribution ownership are not present
 in the supplied materials; the submitter must complete the contribution template
 in that document before a final competition submission.
+
+## E3 - Missingness-aware adaptive questions
+
+Base commit: `5f31859fd4f9a5812750c620375c49ab2f4fef74` (E2).
+
+Hypothesis: choosing the next clarification from the current candidate
+uncertainty will expose useful target evidence sooner than a fixed question
+schedule, lowering MTTC while preserving E2's Hit Rate and MRR.
+
+Controlled changes from E2:
+
+1. Extract shallow, deterministic facet evidence from public catalog metadata
+   into a separate SQLite side table during agent startup.
+2. After the displayed Top 10, collect up to 80 additional unseen BM25
+   candidates without changing the displayed recommendation order.
+3. For each specific question attribute, build an answer distribution that
+   includes the explicit `<missing>` bucket.
+4. Score answerability using observed coverage, normalized entropy, facet
+   reliability, active-constraint downweighting, and expected rank gain under a
+   TechnicalScore-shaped utility.
+5. Make previously asked attributes ineligible, use `other` only below the
+   specific-facet threshold, and stop asking at turn 10.
+6. Record every selection reason and all per-facet statistics in the session's
+   JSON-serializable evidence trace.
+
+The first turn deliberately retains E2's `material` question as a conservative
+guardrail. Duplicate prevention means the policy never repeats an attribute it
+has already asked; a facet already present in the ledger remains eligible at a
+0.60 weight because an additional same-facet detail can still be useful.
+
+### Selection policy
+
+Each candidate contributes its first normalized value for a facet or
+`<missing>`. Let the candidate at rank `r` have prior weight `1 / sqrt(r)`. For a
+non-missing answer, its hypothetical filtered rank is its position within the
+same answer group. The per-candidate utility proxy is:
+
+```text
+U(rank, hit_turn) = 0                                      if rank > 10
+U(rank, hit_turn) = 0.50 + 0.30 / rank
+                    + 0.20 * clip((11 - hit_turn) / 10)    otherwise
+```
+
+Expected gain is the prior-weighted positive change from the old rank to the
+hypothetical filtered rank on the next turn. The deterministic selection score
+is:
+
+```text
+reliability * active_factor * observed_rate^1.5
+            * (expected_gain + 0.025 * normalized_entropy)
+```
+
+The selected specific facet must score at least `0.006`. With fewer than eight
+candidates, the policy uses the remaining deterministic fallback order. If no
+specific facet clears the threshold, it uses `other` once. Tie-breaking follows
+the declared attribute order and never depends on public labels.
+
+Unchanged from E2:
+
+- frozen catalog, public labels, evaluator, and scoring formula;
+- typed constraint parsing, exclusion filtering, intent epochs, and unseen
+  candidate exploration;
+- SQLite FTS5 fields, tokenization, BM25 weights, query, and recommendation
+  ordering;
+- offline, standard-library-only execution;
+- no fitting, training, neural model, LLM, network call, or hidden-label access;
+- zero reported model tokens and estimated model/API cost of `$0`.
+
+### Verification and results
+
+Run:
+
+```bash
+python -m compileall -q starter tests tools
+python -m unittest discover -v
+python -m evaluator.local_evaluator \
+  --output results/e3_adaptive_questions.json
+python -m evaluator.local_evaluator \
+  --output results/e3_adaptive_questions_repeat.json
+sha256sum results/e3_adaptive_questions*.json
+cmp results/e3_adaptive_questions.json \
+  results/e3_adaptive_questions_repeat.json
+python -m tools.fold_report \
+  --baseline results/e2_structured_constraint_ledger.json \
+  --candidate results/e3_adaptive_questions.json \
+  --folds 5 --output results/e3_vs_e2_five_fold_report.json
+python -m tools.benchmark_agent --output results/e3_benchmark.json
+```
+
+Verification evidence:
+
+- `58/58` tests pass: all 47 E2 tests plus 11 E3 policy/integration tests.
+- The two evaluator outputs are byte-identical with SHA-256
+  `d3dd509754dd3152b761a42b3f494106fca14fe2a43baa0dbc896c50223187bc`.
+- All 200 turn-one recommendation lists are identical to E2; both snapshots
+  have SHA-256
+  `20aa4ab3619a33d583541ebbcac030d307cda356ab7d4bad28fe28a53b3f6be3`
+  under the documented sorted-JSON snapshot serialization.
+- Production E3 source has no dependency on `public_set`, ground truth,
+  scenario labels, evaluator modules, model APIs, or network services.
+
+Observed public-set result:
+
+| Metric | E2 | E3 | Delta |
+| --- | ---: | ---: | ---: |
+| Hit Rate@10 | 0.985000 | 0.985000 | 0.000000 |
+| MRR | 0.594141 | 0.596099 | +0.001958 |
+| MTTC | 3.170000 | 3.065000 | -0.105000 |
+| Efficiency | 0.783000 | 0.793500 | +0.010500 |
+| TechnicalScore | 0.827342 | 0.830030 | +0.002688 |
+
+| Scenario | E2 HR | E3 HR | E2 MRR | E3 MRR | E2 MTTC | E3 MTTC |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Buying | 0.987500 | 0.987500 | 0.594182 | 0.594182 | 2.687500 | 2.625000 |
+| Browsing | 1.000000 | 1.000000 | 0.571905 | 0.571905 | 2.837500 | 2.787500 |
+| Intent Override | 0.966667 | 0.966667 | 0.663743 | 0.664299 | 4.866667 | 4.600000 |
+| Boundary | 0.900000 | 0.900000 | 0.562897 | 0.600397 | 4.600000 | 4.200000 |
+
+Every scenario preserves Hit Rate and MRR and lowers MTTC. Across five
+deterministic scenario-stratified folds, TechnicalScore deltas are `+0.005563`,
+`+0.004500`, `+0.001750`, `0.000000`, and `+0.001625`: four improve and one is
+neutral. Fold 3 has an MRR delta of `-0.012500`, offset by a `-0.275000` MTTC
+delta; fold metrics are development stability checks, not fitted estimates.
+
+Saved benchmark (`610` responses): startup `9.617874 s`, mean response latency
+`35.018203 ms`, p95 `83.242458 ms`, p99 `101.071713 ms`, maximum
+`134.601567 ms`, and peak RSS `328.359 MB`. Timing is environment-dependent.
+
+### Limitations and interpretation
+
+- The gain is small and measured on 200 released development sessions; it is
+  not an estimate of the hidden 800-session score.
+- The catalog facet extractor is deterministic and shallow. It can miss
+  synonyms or treat a verbose feature as a distinct answer.
+- The conservative first-turn material guardrail is intentionally not adaptive;
+  candidate-aware selection begins after the first reply.
+- Active facets are downweighted rather than forbidden because the simulator
+  may disclose multiple useful values for one facet. Already asked attributes
+  are always forbidden, so the agent never asks the same question twice.
+- Building the catalog-only facet side table increases startup time relative to
+  E2 (`9.62 s` versus `1.91 s`) and increases mean response latency (`35.0 ms`
+  versus `19.3 ms`). It leaves the BM25 index and returned ranking unchanged.

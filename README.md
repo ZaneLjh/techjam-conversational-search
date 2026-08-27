@@ -34,7 +34,7 @@ Verify the downloaded file using the published `SHA256SUMS` file.
 
 ## Run the Starter
 
-Python 3.10 or later is required for E2. The agent uses only the Python standard
+Python 3.10 or later is required for E3. The agent uses only the Python standard
 library, so there is no dependency-install step.
 
 ```bash
@@ -47,45 +47,55 @@ The command writes per-session results and aggregate metrics to `results.json`.
 The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
 MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
 
-## Current solution: E2 constraint ledger
+## Current solution: E3 adaptive questions
 
-This branch implements E2 as an offline, standard-library-only retrieval agent.
-It replaces append-only conversation text with a typed constraint ledger that
-tracks facet, strength (`MUST`, `SHOULD`, `AVOID`, `NO_PREFERENCE`), polarity,
-source turn, status, and supersession history. Deterministic parsing handles
-clarifications, explicit boundaries, negations, and intent corrections. Only
-active positive constraints enter the BM25 query; active exclusions filter
-matching candidates. Continued turns explore deeper unseen results, and an
-intent override opens a new candidate epoch.
+E3 keeps E2's typed constraint ledger, exclusions, intent epochs, unseen-result
+exploration, and BM25 ranking unchanged. It replaces the fixed clarification
+schedule after the first turn with a deterministic, candidate-aware policy.
+For each response, the policy examines catalog-only facet evidence from the next
+80 unseen BM25 candidates after the displayed page. It builds answer
+distributions with an explicit missing bucket and scores each eligible facet by
+coverage, entropy, evidence reliability, and expected TechnicalScore-shaped
+rank gain.
 
-The catalog, evaluator, FTS5 fields, BM25 weights, and question schedule remain
-unchanged from E1. E2 makes no network calls and reports zero model tokens.
-It uses no model or API, so estimated model/API cost is `$0`.
+An attribute already asked in the session is ineligible, so questions do not
+repeat. Active facets are downweighted, sparse facets are penalized, and `other`
+is used only when no specific facet clears the selection threshold. The first
+question remains E2's conservative `material` ask; later questions adapt to the
+candidate evidence and prior answers. Every decision and its per-facet
+statistics is available through `Agent.evidence_trace()` for review.
 
-| Metric | E1 | E2 |
-| --- | ---: | ---: |
-| Hit Rate@10 | 0.865000 | 0.985000 |
-| MRR | 0.522867 | 0.594141 |
-| MTTC | 4.320000 | 3.170000 |
-| Efficiency | 0.668000 | 0.783000 |
-| TechnicalScore | 0.722960 | 0.827342 |
+The frozen catalog, evaluator, public labels, FTS5 fields, BM25 weights, and
+recommendation order are unchanged. E3 makes no network calls, uses no model or
+API, reports zero model tokens, and has estimated model/API cost of `$0`.
+
+| Metric | E2 | E3 | Delta |
+| --- | ---: | ---: | ---: |
+| Hit Rate@10 | 0.985000 | 0.985000 | 0.000000 |
+| MRR | 0.594141 | 0.596099 | +0.001958 |
+| MTTC | 3.170000 | 3.065000 | -0.105000 |
+| Efficiency | 0.783000 | 0.793500 | +0.010500 |
+| TechnicalScore | 0.827342 | 0.830030 | +0.002688 |
 
 Reproduce the implementation evidence from the repository root:
 
 ```bash
 python -m unittest discover -v
-python -m evaluator.local_evaluator --output results/e2_structured_constraint_ledger.json
-python -m tools.evaluate_variant --disable-candidate-exploration \
-  --output results/e2a_ledger_only.json
+python -m evaluator.local_evaluator \
+  --output results/e3_adaptive_questions.json
+python -m evaluator.local_evaluator \
+  --output results/e3_adaptive_questions_repeat.json
+sha256sum results/e3_adaptive_questions*.json
 python -m tools.fold_report \
-  --baseline results/e1_stateful_lexical.json \
-  --candidate results/e2_structured_constraint_ledger.json \
-  --folds 5 --output results/e2_five_fold_report.json
-python -m tools.benchmark_agent --output results/e2_benchmark.json
+  --baseline results/e2_structured_constraint_ledger.json \
+  --candidate results/e3_adaptive_questions.json \
+  --folds 5 --output results/e3_vs_e2_five_fold_report.json
+python -m tools.benchmark_agent --output results/e3_benchmark.json
 ```
 
-See `docs/experiments.md` for the controlled ablation and limitations, and
-`docs/e2_review_guide.md` for the review upload manifest.
+The two final evaluator JSON files are byte-identical. See
+`docs/experiments.md` for the controlled comparison, fold results, algorithm,
+and limitations.
 
 ## Agent Interface
 
@@ -134,8 +144,9 @@ docs/competition_specification.md participant rules and evaluation protocol
 docs/agent_api_contract.json      machine-readable Agent contract
 docs/evaluation_config.json       scoring configuration
 docs/baseline_results.json        reproducible weak-starter reference score
-starter/agent.py                  E2 retrieval agent and session state
+starter/agent.py                  E3 retrieval agent and session state
 starter/constraints.py            typed constraint parser and ledger
+starter/question_policy.py        candidate-aware question selection and traces
 evaluator/local_evaluator.py      public-set simulator and scorer
 tools/evaluate_variant.py         declared E2 ablation runner
 tools/fold_report.py              scenario-stratified stability report
