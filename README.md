@@ -34,7 +34,7 @@ Verify the downloaded file using the published `SHA256SUMS` file.
 
 ## Run the Starter
 
-Python 3.10 or later is required for E3. The agent uses only the Python standard
+Python 3.10 or later is required for E4. The agent uses only the Python standard
 library, so there is no dependency-install step.
 
 ```bash
@@ -47,55 +47,75 @@ The command writes per-session results and aggregate metrics to `results.json`.
 The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
 MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
 
-## Current solution: E3 adaptive questions
+## Current solution: E4 multi-route retrieval and deterministic reranking
 
-E3 keeps E2's typed constraint ledger, exclusions, intent epochs, unseen-result
-exploration, and BM25 ranking unchanged. It replaces the fixed clarification
-schedule after the first turn with a deterministic, candidate-aware policy.
-For each response, the policy examines catalog-only facet evidence from the next
-80 unseen BM25 candidates after the displayed page. It builds answer
-distributions with an explicit missing bucket and scores each eligible facet by
-coverage, entropy, evidence reliability, and expected TechnicalScore-shaped
-rank gain.
+E4 keeps E3's typed constraint ledger and adaptive-question policy fixed while
+changing only the displayed recommendation ranking. An independent E3 shadow
+candidate stream remains the sole input to the question policy, so an E4 rank
+change cannot silently change the next simulated customer reply.
 
-An attribute already asked in the session is ineligible, so questions do not
-repeat. Active facets are downweighted, sparse facets are penalized, and `other`
-is used only when no specific facet clears the selection threshold. The first
-question remains E2's conservative `material` ask; later questions adapt to the
-candidate evidence and prior answers. Every decision and its per-facet
-statistics is available through `Agent.evidence_trace()` for review.
+For turns with non-category positive evidence, E4 combines four catalog-only
+route families: the accumulated ledger query, current-turn evidence, a
+category-column FTS query, and exact normalized feature/detail scalar lookups.
+Up to four recent facet constraints receive exact and category-plus-exact
+routes.
+Weighted reciprocal-rank fusion scores the complete bounded route union, then a
+stable tie-break uses legacy rank, best route rank, and `parent_asin`. The final
+union is capped at 100 before returning at most 10 recommendations.
 
-The frozen catalog, evaluator, public labels, FTS5 fields, BM25 weights, and
-recommendation order are unchanged. E3 makes no network calls, uses no model or
-API, reports zero model tokens, and has estimated model/API cost of `$0`.
+Category-only turns retain the exact E3 order. Any active `AVOID` constraint
+uses E3's exclusion-safe streaming fallback and is never relaxed. The default
+fusion can retain partial positive matches after stronger exact evidence; the
+declared `no_soft_relaxation` ablation keeps only candidates matching every
+bounded routed `MUST` constraint when such candidates exist. Route decisions,
+weights, ranks, exact coverage, and relaxation counts are available through
+`Agent.evidence_trace()`.
 
-| Metric | E2 | E3 | Delta |
+The catalog, evaluator, public labels, scoring configuration, Agent contract,
+constraint parser, and adaptive-question implementation remain unchanged. E4
+uses only the Python standard library, makes no network or model calls, reports
+zero model tokens, and has estimated model/API cost of `$0`.
+
+| Metric | E3 | E4 | Delta |
 | --- | ---: | ---: | ---: |
-| Hit Rate@10 | 0.985000 | 0.985000 | 0.000000 |
-| MRR | 0.594141 | 0.596099 | +0.001958 |
-| MTTC | 3.170000 | 3.065000 | -0.105000 |
-| Efficiency | 0.783000 | 0.793500 | +0.010500 |
-| TechnicalScore | 0.827342 | 0.830030 | +0.002688 |
+| Hit Rate@10 | 0.985000 | 1.000000 | +0.015000 |
+| MRR | 0.596099 | 0.798198 | +0.202099 |
+| MTTC | 3.065000 | 2.410000 | -0.655000 |
+| Efficiency | 0.793500 | 0.859000 | +0.065500 |
+| TechnicalScore | 0.830030 | 0.911259 | +0.081229 |
 
 Reproduce the implementation evidence from the repository root:
 
 ```bash
+mkdir -p results
+python -m compileall -q starter tests tools
 python -m unittest discover -v
 python -m evaluator.local_evaluator \
-  --output results/e3_adaptive_questions.json
+  --output results/e4_multi_route_reranking.json
 python -m evaluator.local_evaluator \
-  --output results/e3_adaptive_questions_repeat.json
-sha256sum results/e3_adaptive_questions*.json
+  --output results/e4_multi_route_reranking_repeat.json
+cmp results/e4_multi_route_reranking.json \
+  results/e4_multi_route_reranking_repeat.json
+python -m tools.evaluate_variant --disable-multi-route-ranking \
+  --output results/e4a_e3_ranking_ablation.json
+python -m tools.e4_ablation_suite \
+  --output results/e4_ablation_suite.json
+python -m tools.paired_report \
+  --baseline results/e4a_e3_ranking_ablation.json \
+  --candidate results/e4_multi_route_reranking.json \
+  --changes-only --output results/e4_vs_e3_paired_report.json
 python -m tools.fold_report \
-  --baseline results/e2_structured_constraint_ledger.json \
-  --candidate results/e3_adaptive_questions.json \
-  --folds 5 --output results/e3_vs_e2_five_fold_report.json
-python -m tools.benchmark_agent --output results/e3_benchmark.json
+  --baseline results/e4a_e3_ranking_ablation.json \
+  --candidate results/e4_multi_route_reranking.json \
+  --folds 5 --output results/e4_vs_e3_five_fold_report.json
+python -m tools.benchmark_agent --output results/e4_benchmark.json
 ```
 
-The two final evaluator JSON files are byte-identical. See
-`docs/experiments.md` for the controlled comparison, fold results, algorithm,
-and limitations.
+The 200 released sessions are development evidence, not an estimate of the 800
+hidden sessions. The five-fold report is only a deterministic stability slice
+of that same development set; it is not cross-validation or held-out
+validation. See `docs/experiments.md` for the fusion formula, controlled
+ablations, scenario results, performance, and limitations.
 
 ## Agent Interface
 
@@ -146,11 +166,14 @@ docs/competition_specification.md participant rules and evaluation protocol
 docs/agent_api_contract.json      machine-readable Agent contract
 docs/evaluation_config.json       scoring configuration
 docs/baseline_results.json        reproducible weak-starter reference score
-starter/agent.py                  E3 retrieval agent and session state
+starter/agent.py                  E4 retrieval agent and session state
 starter/constraints.py            typed constraint parser and ledger
 starter/question_policy.py        candidate-aware question selection and traces
+starter/retrieval.py              bounded routes, exact index, fusion, and reranking
 evaluator/local_evaluator.py      public-set simulator and scorer
-tools/evaluate_variant.py         declared E2 ablation runner
+tools/evaluate_variant.py         single-switch E2/E4 variant runner
+tools/e4_ablation_suite.py        fixed E4 component-ablation matrix
+tools/paired_report.py             paired per-session utility comparison
 tools/fold_report.py              scenario-stratified stability report
 tools/benchmark_agent.py          latency and resource benchmark
 ```

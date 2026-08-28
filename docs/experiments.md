@@ -346,3 +346,196 @@ Saved benchmark (`610` responses): startup `9.617874 s`, mean response latency
 - Building the catalog-only facet side table increases startup time relative to
   E2 (`9.62 s` versus `1.91 s`) and increases mean response latency (`35.0 ms`
   versus `19.3 ms`). It leaves the BM25 index and returned ranking unchanged.
+
+## E4 - Multi-route retrieval and deterministic reranking
+
+Base experiment: E3 adaptive questions.
+
+Hypothesis: E3's broad lexical route has enough recall but cannot consistently
+place a product supported by an exact catalog constraint near the top. Fusing
+independent current-turn, ledger, category, and exact-scalar routes should
+improve first-hit rank without changing the clarification policy or using
+evaluation labels at runtime.
+
+### Controlled changes from E3
+
+1. Build catalog-only exact lookup tables for normalized feature scalars,
+   `key: value` detail scalars, titles, prices, coarse categories, and stable
+   catalog quality tie-breaks.
+2. On a focused positive turn, run the unchanged accumulated-ledger BM25 stream
+   once and share it between the frozen E3 question window and E4 fusion.
+3. Add an OR current-turn route and a category-column FTS route with an OR
+   fallback when its conjunction is empty.
+4. For at most the four newest non-category constraints, add exact-scalar and
+   category-plus-exact routes. Raw and normalized spelling aliases include the
+   deterministic `gray`/`grey` equivalence.
+5. Score the complete route union with weighted reciprocal-rank fusion, apply a
+   deterministic tie-break, and only then cap the final union at 100.
+6. Record route counts, weights, ranks, exact coverage, routed `MUST` coverage,
+   and relaxation use in a JSON-serializable evidence trace.
+
+The E3 adaptive-question candidate window remains independent of E4's displayed
+ranking on every turn, including transitions from a focused E4 turn to a later
+no-preference or `AVOID` fallback. Intent override clears both exploration sets.
+Category-only turns retain exact E3 ordering. Active exclusions use E3's
+unbounded compliant-row stream and are never relaxed.
+
+### Fusion and relaxation
+
+For a constraint `c` observed on turn `t`:
+
+```text
+constraint_weight(c, t)
+  = (1.35 if MUST else 0.85)
+    * confidence(c)
+    * (1.25 if source_turn(c) == t else 1.00)
+
+RRF(product)
+  = sum(route_weight / (60 + rank_in_route))
+```
+
+Fixed route weights are:
+
+| Route | Weight |
+| --- | ---: |
+| Accumulated ledger BM25 | 1.00 |
+| Category-column BM25 | 1.10 |
+| Current-turn BM25 | 1.25 |
+| Exact scalar | `1.35 * constraint_weight` |
+| Category plus exact scalar | `2.00 * constraint_weight` |
+
+The deterministic final order is descending fused score, then accumulated
+ledger rank, best route rank, and `parent_asin`. Default E4 retains relaxed
+positive matches after stronger exact evidence so it can still fill Top 10.
+The `no_soft_relaxation` ablation filters to candidates matching every bounded
+routed `MUST` constraint when at least one such candidate exists. It does not
+alter exclusions, negations, superseded constraints, or no-preference entries.
+
+### Unchanged from E3
+
+- frozen catalog, public labels, evaluator, scoring formula, and Agent contract;
+- typed ledger, constraint parser, exclusions, intent epochs, and unseen-result
+  exploration;
+- adaptive-question implementation and its candidate inputs;
+- FTS5 fields, tokenizer, and BM25 field weights;
+- offline, standard-library-only execution with no model, training, network,
+  secret, or hidden-label dependency;
+- zero reported model tokens and estimated model/API cost of `$0`.
+
+### Reproduction
+
+```bash
+mkdir -p results
+python -m compileall -q starter tests tools
+python -m unittest discover -v
+
+python -m evaluator.local_evaluator \
+  --output results/e4_multi_route_reranking.json
+python -m evaluator.local_evaluator \
+  --output results/e4_multi_route_reranking_repeat.json
+cmp results/e4_multi_route_reranking.json \
+  results/e4_multi_route_reranking_repeat.json
+sha256sum results/e4_multi_route_reranking*.json
+
+python -m tools.evaluate_variant \
+  --disable-multi-route-ranking \
+  --output results/e4a_e3_ranking_ablation.json
+sha256sum results/e4a_e3_ranking_ablation.json
+
+python -m tools.e4_ablation_suite \
+  --output results/e4_ablation_suite.json
+python -m tools.paired_report \
+  --baseline results/e4a_e3_ranking_ablation.json \
+  --candidate results/e4_multi_route_reranking.json \
+  --changes-only --output results/e4_vs_e3_paired_report.json
+python -m tools.fold_report \
+  --baseline results/e4a_e3_ranking_ablation.json \
+  --candidate results/e4_multi_route_reranking.json \
+  --folds 5 --output results/e4_vs_e3_five_fold_report.json
+python -m tools.benchmark_agent --output results/e4_benchmark.json
+```
+
+### Public-development result
+
+| Metric | E3 | E4 | Delta |
+| --- | ---: | ---: | ---: |
+| Hit Rate@10 | 0.985000 | 1.000000 | +0.015000 |
+| MRR | 0.596099 | 0.798198 | +0.202099 |
+| MTTC | 3.065000 | 2.410000 | -0.655000 |
+| Efficiency | 0.793500 | 0.859000 | +0.065500 |
+| TechnicalScore | 0.830030 | 0.911259 | +0.081229 |
+
+| Scenario | Hit Rate@10 | MRR | MTTC |
+| --- | ---: | ---: | ---: |
+| Buying | 1.000000 | 0.811265 | 1.887500 |
+| Browsing | 1.000000 | 0.788209 | 2.325000 |
+| Intent Override | 1.000000 | 0.806984 | 3.666667 |
+| Boundary | 1.000000 | 0.747222 | 3.500000 |
+
+The fixed component-ablation matrix reuses one catalog index, clears session
+state between variants, and keeps the E3 question shadow fixed. `Delta` is full
+E4 TechnicalScore minus the variant score:
+
+| Variant | HR@10 | MRR | MTTC | TechnicalScore | Delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Full E4 | 1.000000 | 0.798198 | 2.410000 | 0.911259 | 0.000000 |
+| E3 compatibility | 0.985000 | 0.596099 | 3.065000 | 0.830030 | +0.081229 |
+| No current-turn route | 1.000000 | 0.813833 | 2.415000 | 0.915850 | -0.004591 |
+| No ledger route | 1.000000 | 0.811990 | 2.425000 | 0.915097 | -0.003838 |
+| No category route | 1.000000 | 0.816728 | 2.415000 | 0.916718 | -0.005459 |
+| No exact-facet routes | 0.875000 | 0.484145 | 4.100000 | 0.720743 | +0.190516 |
+| No fusion/reranking | 0.985000 | 0.596099 | 3.065000 | 0.830030 | +0.081229 |
+| No soft relaxation | 0.995000 | 0.843504 | 2.585000 | 0.918851 | -0.007592 |
+
+Exact-facet routes are the decisive public-set component: removing them costs
+`0.190516` TechnicalScore. Disabling fusion restores E3 metrics exactly. The
+three lexical drop-one variants each score slightly higher on this development
+set, so their retained value is a declared robustness hedge for paraphrases and
+non-exact evidence, not a positive marginal public-set claim. Strict-only also
+scores higher but loses one hit; default relaxation deliberately preserves
+HR@10 `1.000000`. These comparisons were inspected after development and were
+not used to retune the frozen full configuration.
+
+Verification evidence:
+
+- `78/78` unit tests pass, including E3 compatibility, shadow-question
+  transitions, bounded routes, exact-category classification, relaxation switch
+  composition, exclusions, determinism, and evidence-tool tests.
+- Two full evaluator outputs are byte-identical with SHA-256
+  `519530f0e675b8a6ebcfbf22e877db99ee5eed371a945736773f73260abfec9e`.
+- Disabling multi-route ranking reproduces E3 byte-for-byte with SHA-256
+  `d3dd509754dd3152b761a42b3f494106fca14fe2a43baa0dbc896c50223187bc`.
+- The paired report records `105` improved, `22` regressed, and `73` tied
+  sessions; all three E3 misses become hits and no E3 hit becomes a miss.
+- Every deterministic stability fold improves TechnicalScore. Fold deltas are
+  `+0.073446`, `+0.056270`, `+0.105729`, `+0.085899`, and `+0.084804`.
+- A source-stable benchmark over `482` responses records startup `29.064902 s`,
+  mean `97.168853 ms`, p95 `246.659532 ms`, p99 `352.132103 ms`, maximum
+  `436.198922 ms`, and peak RSS `390.770 MiB`. Timing is environment-dependent.
+- Production source has no evaluation-label, evaluator, model, API, or network
+  dependency; catalog, evaluator, public labels, scoring config, and API contract
+  are unchanged.
+
+### Limitations and interpretation
+
+- These metrics are from the same 200 released development sessions used during
+  development. They are not an estimate of the organizer's hidden 800 sessions.
+- The five deterministic scenario-stratified partitions are a stability slice,
+  not cross-validation or held-out validation; no model is fitted within them.
+- Exact routes recognize normalized full catalog scalars, not arbitrary semantic
+  paraphrases. Lexical routes provide the controlled fallback for non-exact
+  language.
+- At most four recent non-category constraints receive exact routes. This keeps
+  route count bounded but means older evidence contributes through the ledger
+  route rather than through a separate exact route.
+- Default relaxation is a weighted-fusion policy, not a proof that every
+  positive constraint is satisfied. `AVOID` remains hard, while incomplete
+  positive matches may fill the list.
+- Exact side tables increase startup time and memory. Timing and peak RSS are
+  environment-dependent and are disclosed with the final benchmark rather than
+  treated as deterministic correctness evidence.
+- The linear exclusion matcher avoids the earlier quadratic rescan, but an
+  adversarial query whose exclusion rejects thousands of rows can still take
+  seconds. If E3-shadow and E4-display histories have diverged, the safe fallback
+  may scan the same FTS stream twice. The released replay contains no `AVOID`
+  turn, so this synthetic tail is not represented by the public benchmark.

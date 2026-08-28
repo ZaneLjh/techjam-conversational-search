@@ -9,6 +9,7 @@ from pathlib import Path
 
 from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 from starter.agent import Agent
+from starter.retrieval import RetrievalConfig
 
 try:
     import resource
@@ -23,9 +24,13 @@ def percentile(values: list[float], quantile: float) -> float:
 
 
 class TimedAgent:
-    def __init__(self, catalog_path: str | Path) -> None:
+    def __init__(
+        self,
+        catalog_path: str | Path,
+        retrieval_config: RetrievalConfig | None = None,
+    ) -> None:
         started = time.perf_counter()
-        self.agent = Agent(catalog_path)
+        self.agent = Agent(catalog_path, retrieval_config=retrieval_config)
         self.startup_seconds = time.perf_counter() - started
         self.response_seconds: list[float] = []
 
@@ -49,15 +54,23 @@ def peak_rss_mb() -> float | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark E2 with the official public harness.")
+    parser = argparse.ArgumentParser(description="Benchmark E4 with the public harness.")
     parser.add_argument("--catalog", default="data/catalog.jsonl")
     parser.add_argument("--dataset", default="data/public_set.jsonl")
-    parser.add_argument("--output", default="results/e2_benchmark.json")
+    parser.add_argument("--output", default="results/e4_benchmark.json")
+    parser.add_argument(
+        "--disable-multi-route-ranking",
+        action="store_true",
+        help="Benchmark the E3 compatibility path.",
+    )
     args = parser.parse_args()
 
     samples = load_jsonl(args.dataset)
     catalog_ids, categories, products = catalog_index(args.catalog)
-    agent = TimedAgent(args.catalog)
+    agent = TimedAgent(
+        args.catalog,
+        RetrievalConfig(enabled=not args.disable_multi_route_ranking),
+    )
     evaluation_started = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)
     evaluation_seconds = time.perf_counter() - evaluation_started
