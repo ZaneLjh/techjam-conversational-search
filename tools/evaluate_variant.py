@@ -6,6 +6,7 @@ from pathlib import Path
 
 from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 from starter.agent import Agent
+from starter.projection import ProjectionConfig
 from starter.retrieval import (
     RetrievalConfig,
     e4_1_candidate_config,
@@ -74,6 +75,48 @@ def main() -> None:
             "reproducing full E4 ranking while retaining E4 retrieval."
         ),
     )
+    parser.add_argument(
+        "--e4-5-candidate",
+        action="store_true",
+        help=(
+            "Run E4.5 projection and exact question rollouts on frozen E4. "
+            "A validated sidecar and manifest are required to activate it."
+        ),
+    )
+    parser.add_argument(
+        "--disable-e4-5",
+        action="store_true",
+        help="Master E4.5 kill switch; reproduce frozen E4.",
+    )
+    parser.add_argument(
+        "--projection-sidecar",
+        default="results/e4_5_intent_projection.jsonl.gz",
+    )
+    parser.add_argument(
+        "--projection-manifest",
+        default="results/e4_5_projection_manifest.json",
+    )
+    parser.add_argument("--disable-projection-reranking", action="store_true")
+    parser.add_argument("--disable-projection-rollout", action="store_true")
+    parser.add_argument(
+        "--projection-max-rerank-posterior",
+        "--projection-max-posterior",
+        dest="projection_max_rerank_posterior",
+        type=int,
+        choices=range(1, 101),
+        default=1,
+    )
+    parser.add_argument(
+        "--projection-max-rollout-posterior",
+        type=int,
+        choices=range(1, 101),
+        default=100,
+    )
+    parser.add_argument(
+        "--projection-min-question-gain",
+        type=float,
+        default=0.002,
+    )
     parser.add_argument("--disable-strict-front", action="store_true")
     parser.add_argument("--disable-auxiliary-confidence-gate", action="store_true")
     parser.add_argument(
@@ -88,7 +131,11 @@ def main() -> None:
     catalog_ids, categories, products = catalog_index(args.catalog)
     selected = (
         e4_fallback_config()
-        if args.e4_fallback_ranking
+        if (
+            args.e4_fallback_ranking
+            or args.e4_5_candidate
+            or args.disable_e4_5
+        )
         else e4_1_strict_only_config()
         if args.e4_1_strict_only_diagnostic
         else e4_1_candidate_config()
@@ -118,10 +165,20 @@ def main() -> None:
         args.catalog,
         explore_unseen=not args.disable_candidate_exploration,
         retrieval_config=retrieval_config,
+        projection_config=ProjectionConfig(
+            enabled=args.e4_5_candidate and not args.disable_e4_5,
+            sidecar_path=args.projection_sidecar,
+            manifest_path=args.projection_manifest,
+            use_reranking=not args.disable_projection_reranking,
+            use_question_rollout=not args.disable_projection_rollout,
+            max_rerank_posterior_size=args.projection_max_rerank_posterior,
+            max_posterior_size=args.projection_max_rollout_posterior,
+            min_question_gain=args.projection_min_question_gain,
+        ),
     )
     result = evaluate(agent, samples, catalog_ids, categories, products)
     rendered = json.dumps(result, indent=2) + "\n"
-    Path(args.output).write_text(rendered, encoding="utf-8")
+    Path(args.output).write_bytes(rendered.encode("utf-8"))
     print(
         json.dumps(
             {key: value for key, value in result.items() if key != "sessions"},

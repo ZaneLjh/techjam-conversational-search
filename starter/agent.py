@@ -3,14 +3,32 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from starter.constraints import ConstraintLedger, parse_message
+from starter.constraints import (
+    ConstraintLedger,
+    ConstraintSource,
+    Facet,
+    ParsedConstraint,
+    Polarity,
+    Strength,
+    normalize_value,
+    parse_message,
+)
 from starter.question_policy import (
     AdaptiveQuestionPolicy,
     QuestionCandidate,
+    QuestionPolicyConfig,
     extract_question_facets,
+)
+from starter.projection import (
+    ProjectionConfig,
+    ProjectionIndex,
+    ProjectionRanking,
+    classify_constraint,
+    is_projection_template_message,
+    normalize_projection_value,
 )
 from starter.retrieval import (
     MultiRouteRetriever,
@@ -37,6 +55,32 @@ STOPWORDS = {
 
 QUESTION_CANDIDATE_DEPTH = 80
 
+NO_ADDITIONAL_OTHER_RE = re.compile(
+    r"^\s*I don't have an additional preference for other\.\s*$",
+    re.IGNORECASE,
+)
+KEY_REQUIREMENT_RE = re.compile(
+    r"^I'm looking for .+\. A key requirement is: (?P<value>.+)\.$"
+)
+KEY_REQUIREMENT_LOOSE_RE = re.compile(
+    KEY_REQUIREMENT_RE.pattern,
+    re.IGNORECASE,
+)
+OVERRIDE_REQUIREMENT_RE = re.compile(
+    r"^Actually, ignore my earlier preference\. What I need is: (?P<value>.+)\.$"
+)
+PROJECTED_REPLY_RE = re.compile(r"^For that, what matters is: .+\.$")
+OVERRIDE_REQUIREMENT_LOOSE_RE = re.compile(
+    OVERRIDE_REQUIREMENT_RE.pattern,
+    re.IGNORECASE,
+)
+PROJECTED_REPLY_LOOSE_RE = re.compile(
+    PROJECTED_REPLY_RE.pattern,
+    re.IGNORECASE,
+)
+INTENT_OVERRIDE_INITIAL_RE = re.compile(r"^I'm looking for .+\. .+$")
+PROJECTION_REPLY_SENTINELS = {"<no-question>", "<no-additional>"}
+
 
 @dataclass
 class SessionState:
@@ -44,6 +88,7 @@ class SessionState:
 
     user_profile: dict
     ledger: ConstraintLedger = field(default_factory=ConstraintLedger)
+    projection_ledger: ConstraintLedger = field(default_factory=ConstraintLedger)
     last_asked_attribute: str | None = None
     shown_ids: set[str] = field(default_factory=set)
     asked_attributes: set[str] = field(default_factory=set)
@@ -51,10 +96,62 @@ class SessionState:
     retrieval_decisions: list[dict] = field(default_factory=list)
     question_shown_ids: set[str] = field(default_factory=set)
     intent_epoch: int = 0
+    infer_other_answer_facets: bool = False
+    other_exhausted: bool = False
+    projection_template_confident: bool = True
+    projection_decisions: list[dict] = field(default_factory=list)
+    projection_question_decisions: list[dict] = field(default_factory=list)
+    projection_disclosed_values: set[str] = field(default_factory=set)
+    projection_pending_exact_values: tuple[ParsedConstraint, ...] = ()
+    projection_override_pending: bool = False
 
     def add_message(self, message: str, turn: int) -> bool:
-        update = parse_message(message, turn, self.last_asked_attribute)
+        current_template_recognized = is_projection_template_message(message, turn)
+        normalized_message = re.sub(r"\s+", " ", str(message)).strip()
+        self.projection_template_confident = (
+            self.projection_template_confident and current_template_recognized
+        )
+        if (
+            current_template_recognized
+            and self.projection_template_confident
+            and self.infer_other_answer_facets
+            and self.last_asked_attribute == "other"
+            and NO_ADDITIONAL_OTHER_RE.fullmatch(normalized_message)
+        ):
+            self.other_exhausted = True
+        update = parse_message(
+            message,
+            turn,
+            self.last_asked_attribute,
+            infer_other_facets=False,
+        )
+        projection_update = parse_message(
+            message,
+            turn,
+            self.last_asked_attribute,
+            infer_other_facets=(
+                self.infer_other_answer_facets
+                and current_template_recognized
+                and self.projection_template_confident
+            ),
+        )
+        if self.projection_pending_exact_values:
+            # The public protocol joins projected clues with semicolons.  A
+            # semicolon may also belong to one exact catalog clue, so replace
+            # only the parsed payload with the values resolved by the public
+            # reply partition while retaining a first-turn category anchor.
+            anchors = tuple(
+                item
+                for item in projection_update.constraints
+                if item.facet is Facet.CATEGORY
+            )
+            projection_update = replace(
+                projection_update,
+                constraints=(*anchors, *self.projection_pending_exact_values),
+            )
+            self.projection_pending_exact_values = ()
         self.ledger.apply(update)
+        self.projection_ledger.apply(projection_update)
         if update.is_override:
             # A pre-override target is deliberately unscoreable. Re-open the
             # candidate pool when the corrected intent becomes active.
@@ -158,6 +255,8 @@ class Agent:
         *,
         explore_unseen: bool = True,
         retrieval_config: RetrievalConfig | None = None,
+        question_policy_config: QuestionPolicyConfig | None = None,
+        projection_config: ProjectionConfig | None = None,
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.explore_unseen = explore_unseen
@@ -165,11 +264,187 @@ class Agent:
         # validation. Applying the patch therefore preserves full E4 by
         # default; experiment tools pass the E4.1 candidate explicitly.
         self.retrieval_config = retrieval_config or e4_fallback_config()
+        self.projection_config = projection_config or ProjectionConfig()
+        self.question_policy_config = question_policy_config or QuestionPolicyConfig(
+            repeat_other_until_exhausted=self.projection_config.enabled,
+        )
         self.connection = sqlite3.connect(":memory:")
         self._sessions: dict[str, SessionState] = {}
-        self.question_policy = AdaptiveQuestionPolicy()
+        self.question_policy = AdaptiveQuestionPolicy(
+            config=self.question_policy_config,
+        )
         self._build_index()
         self.retriever = MultiRouteRetriever(self.connection, self.retrieval_config)
+        self.projection_index = ProjectionIndex(self.catalog_path, self.projection_config)
+
+    @staticmethod
+    def _exact_projection_constraints(
+        values: tuple[str, ...],
+        *,
+        turn: int,
+        source: ConstraintSource,
+        strength: Strength,
+        confidence: float,
+    ) -> tuple[ParsedConstraint, ...]:
+        """Build constraints without splitting exact public clue strings."""
+
+        constraints: list[ParsedConstraint] = []
+        for value in values:
+            raw_value = str(value)
+            normalized = normalize_value(raw_value)
+            if not normalized:
+                continue
+            constraints.append(
+                ParsedConstraint(
+                    facet=Facet(classify_constraint(raw_value)),
+                    raw_value=raw_value,
+                    normalized_value=normalized,
+                    polarity=Polarity.POSITIVE,
+                    strength=strength,
+                    confidence=confidence,
+                    source_turn=turn,
+                    source=source,
+                    evidence_span=raw_value,
+                )
+            )
+        return tuple(constraints)
+
+    def _projection_category_ids(self, state: SessionState) -> tuple[str, ...]:
+        """Return the complete public-sidecar category scope in stable order."""
+
+        identifiers: list[str] = []
+        for constraint in state.projection_ledger.active():
+            if constraint.facet is not Facet.CATEGORY:
+                continue
+            identifiers.extend(
+                str(parent_asin)
+                for parent_asin in self.projection_index._category_index.get(
+                    normalize_projection_value(constraint.raw_value),
+                    (),
+                )
+            )
+        return tuple(dict.fromkeys(identifiers))
+
+    def _track_projection_disclosures(
+        self,
+        state: SessionState,
+        message: str,
+        turn: int,
+        *,
+        projection_decision: dict | None = None,
+        exclude_displayed: bool = True,
+    ) -> bool:
+        """Track simulator-visible raw clues without canonical deduplication."""
+
+        canonical_message = str(message)
+        normalized_message = re.sub(r"\s+", " ", canonical_message).strip()
+        if (
+            canonical_message != normalized_message
+            and not NO_ADDITIONAL_OTHER_RE.fullmatch(normalized_message)
+        ):
+            # Exact raw clue disclosure is protocol-sensitive. Whitespace is
+            # normalized only for the explicit exhaustion boundary, whose
+            # payload contains no clue to recover.
+            if OVERRIDE_REQUIREMENT_LOOSE_RE.fullmatch(normalized_message):
+                state.projection_override_pending = False
+            state.projection_template_confident = False
+            return True
+        key_requirement = KEY_REQUIREMENT_RE.fullmatch(canonical_message)
+        if turn == 1 and key_requirement:
+            value = key_requirement.group("value")
+            state.projection_disclosed_values.add(value)
+            state.projection_pending_exact_values = self._exact_projection_constraints(
+                (value,),
+                turn=turn,
+                source=ConstraintSource.EXPLICIT_REQUIREMENT,
+                strength=Strength.MUST,
+                confidence=1.0,
+            )
+            return True
+        if turn == 1 and INTENT_OVERRIDE_INITIAL_RE.fullmatch(canonical_message):
+            # The value is intentionally undisclosed because the simulator can
+            # replace this provisional intent before it becomes scoreable.
+            state.projection_override_pending = True
+            return True
+        override = OVERRIDE_REQUIREMENT_RE.fullmatch(canonical_message)
+        if override:
+            value = override.group("value")
+            state.projection_disclosed_values.add(value)
+            state.projection_pending_exact_values = self._exact_projection_constraints(
+                (value,),
+                turn=turn,
+                source=ConstraintSource.CORRECTION,
+                strength=Strength.MUST,
+                confidence=1.0,
+            )
+            state.projection_override_pending = False
+            return True
+        if (
+            KEY_REQUIREMENT_LOOSE_RE.fullmatch(normalized_message)
+            or OVERRIDE_REQUIREMENT_LOOSE_RE.fullmatch(normalized_message)
+        ):
+            state.projection_override_pending = False
+            state.projection_template_confident = False
+            return True
+        if not PROJECTED_REPLY_RE.fullmatch(canonical_message):
+            if PROJECTED_REPLY_LOOSE_RE.fullmatch(normalized_message):
+                state.projection_template_confident = False
+            return True
+
+        previous = projection_decision
+        if previous is None and state.projection_decisions:
+            previous = state.projection_decisions[-1]
+        if previous and previous.get("active"):
+            parent_ids = tuple(str(value) for value in previous.get("posterior_ids", ()))
+            displayed = (
+                set(str(value) for value in previous.get("recommendation_ids", ()))
+                if exclude_displayed and not state.projection_override_pending
+                else set()
+            )
+        else:
+            # The first projected answer arrives before ranking has necessarily
+            # established an active trace. Resolve it over the complete exact
+            # category, not a bounded/prelimited subset that could hide a
+            # colliding raw reply.
+            parent_ids = self._projection_category_ids(state)
+            displayed = (
+                set(str(value) for value in (previous or {}).get("recommendation_ids", ()))
+                if exclude_displayed and not state.projection_override_pending
+                else set()
+            )
+
+        possible_signatures: set[tuple[str, ...]] = set()
+        for parent_asin in parent_ids:
+            if parent_asin in displayed:
+                continue
+            record = self.projection_index.records.get(parent_asin)
+            if record is None or not state.last_asked_attribute:
+                continue
+            signature = self.projection_index._reply_signature(
+                record,
+                state.last_asked_attribute,
+                state.projection_disclosed_values,
+            )
+            if not signature or signature[0] in PROJECTION_REPLY_SENTINELS:
+                continue
+            rendered = "For that, what matters is: " + "; ".join(signature) + "."
+            rendered = re.sub(r"\s+", " ", rendered).strip()
+            if rendered == normalized_message:
+                possible_signatures.add(signature)
+        if len(possible_signatures) != 1:
+            state.projection_template_confident = False
+            return False
+
+        signature = possible_signatures.pop()
+        state.projection_disclosed_values.update(signature)
+        state.projection_pending_exact_values = self._exact_projection_constraints(
+            signature,
+            turn=turn,
+            source=ConstraintSource.CLARIFICATION,
+            strength=Strength.MUST,
+            confidence=0.95,
+        )
+        return True
 
     def _build_index(self) -> None:
         cursor = self.connection.cursor()
@@ -336,7 +611,12 @@ class Agent:
     def reset(self, session_id: str, user_profile: dict) -> None:
         # The profile is anonymized. E4 retains it for the later personalization
         # experiment but does not yet use it for ranking.
-        self._sessions[session_id] = SessionState(user_profile=dict(user_profile))
+        self._sessions[session_id] = SessionState(
+            user_profile=dict(user_profile),
+            infer_other_answer_facets=(
+                self.question_policy_config.repeat_other_until_exhausted
+            ),
+        )
 
     def _legacy_candidates(
         self,
@@ -451,7 +731,13 @@ class Agent:
         if state is None:
             raise RuntimeError("reset must be called before respond")
 
+        projection_disclosure_resolved = self._track_projection_disclosures(
+            state,
+            user_message,
+            turn,
+        )
         state.add_message(user_message, turn)
+        shown_before = set(state.shown_ids)
         requested_k = min(max(int(top_k), 1), 10)
         if self.retrieval_config.enabled:
             active_constraints = state.ledger.active()
@@ -536,35 +822,128 @@ class Agent:
                 ):
                     state.shown_ids.update(identifiers)
                 state.retrieval_decisions.append(retrieval.trace)
-            recommendations = [
-                {"parent_asin": parent_asin}
-                for parent_asin in identifiers
-            ]
         else:
             identifiers, question_identifiers = self._legacy_candidates(
                 state,
                 requested_k,
                 state.shown_ids,
             )
-            recommendations = [
-                {"parent_asin": parent_asin}
-                for parent_asin in identifiers
-            ]
+
+        predecessor_trace = (
+            state.retrieval_decisions[-1] if state.retrieval_decisions else {}
+        )
+        predecessor_candidate_ids = list(
+            dict.fromkeys(
+                [
+                    *identifiers,
+                    *predecessor_trace.get("candidate_ids", ()),
+                    *question_identifiers,
+                ]
+            )
+        )[:100]
+        predecessor_identifiers = tuple(identifiers)
+        predecessor_shown_ids = set(state.shown_ids)
+        try:
+            projection_ranking = self.projection_index.rerank(
+                recommendation_ids=identifiers,
+                candidate_ids=predecessor_candidate_ids,
+                constraints=state.projection_ledger.entries,
+                shown_ids=shown_before,
+                requested_k=requested_k,
+                template_confident=(
+                    state.projection_template_confident
+                    and projection_disclosure_resolved
+                ),
+            )
+        except Exception:
+            projection_ranking = self.projection_index._fallback(
+                identifiers,
+                predecessor_candidate_ids,
+                "runtime_error",
+            )
+        state.projection_decisions.append(dict(projection_ranking.trace))
+
+        if projection_ranking.active:
+            identifiers = list(projection_ranking.recommendation_ids)
+            if self.explore_unseen:
+                state.shown_ids = set(shown_before)
+                state.shown_ids.update(identifiers)
 
         question_candidates = self._question_candidates(question_identifiers)
-        decision = self.question_policy.choose(
+        predecessor_decision = self.question_policy.choose(
             question_candidates,
             active_facets=state.active_facets(),
             asked_attributes=state.asked_attributes,
             turn=turn,
             guardrail_attribute=_initial_question_guardrail(turn),
+            other_exhausted=state.other_exhausted,
         )
+        decision = predecessor_decision
+        question_runtime_error: str | None = None
+        try:
+            projected_attribute, rollout_trace = self.projection_index.choose_question(
+                ranking=projection_ranking,
+                constraints=state.projection_ledger.entries,
+                disclosed_values=state.projection_disclosed_values,
+                asked_attributes=state.asked_attributes,
+                other_exhausted=state.other_exhausted,
+                turn=turn,
+                baseline_attribute=predecessor_decision.ask_attribute,
+                condition_on_current_miss=not state.projection_override_pending,
+            )
+        except Exception as exc:
+            question_runtime_error = f"runtime_error:{type(exc).__name__}"
+            projected_attribute = None
+            rollout_trace = {
+                "active": False,
+                "reason": question_runtime_error,
+            }
+
+        if question_runtime_error is None and projected_attribute is not None:
+            try:
+                decision = self.question_policy.choose(
+                    question_candidates,
+                    active_facets=state.active_facets(),
+                    asked_attributes=state.asked_attributes,
+                    turn=turn,
+                    guardrail_attribute=_initial_question_guardrail(turn),
+                    other_exhausted=state.other_exhausted,
+                    projected_attribute=projected_attribute,
+                    allow_repeated_other=projection_ranking.active,
+                )
+            except Exception as exc:
+                question_runtime_error = f"policy_error:{type(exc).__name__}"
+                rollout_trace = {
+                    "active": False,
+                    "reason": question_runtime_error,
+                }
+
+        if question_runtime_error is not None:
+            # Question rollout is part of the same projection transaction as
+            # reranking. If it fails, expose the complete predecessor turn and
+            # restore its exploration bookkeeping.
+            identifiers = list(predecessor_identifiers)
+            state.shown_ids = predecessor_shown_ids
+            projection_ranking = self.projection_index._fallback(
+                predecessor_identifiers,
+                predecessor_candidate_ids,
+                f"question_{question_runtime_error}",
+            )
+            state.projection_decisions[-1] = dict(projection_ranking.trace)
+
+        state.projection_question_decisions.append(dict(rollout_trace))
         ask_attribute = decision.ask_attribute
         message = decision.message
         if ask_attribute is not None:
             state.asked_attributes.add(ask_attribute)
         state.question_decisions.append(decision.as_dict())
         state.last_asked_attribute = ask_attribute
+        state.infer_other_answer_facets = projection_ranking.active
+
+        recommendations = [
+            {"parent_asin": parent_asin}
+            for parent_asin in identifiers
+        ]
 
         return {
             "message": message,
@@ -583,12 +962,22 @@ class Agent:
             "canonical_query": state.query_text(),
             "candidate_exploration": self.explore_unseen,
             "multi_route_retrieval": self.retrieval_config.enabled,
+            "projection_enabled": self.projection_config.enabled,
+            "projection_ready": self.projection_index.ready,
+            "projection_status_reason": self.projection_index.status_reason,
+            "projection_template_confident": state.projection_template_confident,
             "question_candidate_ranking": "e3_frozen",
             "last_asked_attribute": state.last_asked_attribute,
             "intent_epoch": state.intent_epoch,
+            "other_exhausted": state.other_exhausted,
             "shown_ids": sorted(state.shown_ids),
             "asked_attributes": sorted(state.asked_attributes),
             "question_decisions": list(state.question_decisions),
             "retrieval_decisions": list(state.retrieval_decisions),
+            "projection_decisions": list(state.projection_decisions),
+            "projection_question_decisions": list(
+                state.projection_question_decisions
+            ),
+            "projection_constraints": state.projection_ledger.evidence_trace(),
             "constraints": state.ledger.evidence_trace(),
         }

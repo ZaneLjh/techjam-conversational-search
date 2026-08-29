@@ -76,6 +76,13 @@ MIN_ADAPTIVE_CANDIDATES = 8
 MIN_SELECTION_SCORE = 0.006
 
 
+@dataclass(frozen=True)
+class QuestionPolicyConfig:
+    """Opt-in controls layered over the frozen E3 question policy."""
+
+    repeat_other_until_exhausted: bool = False
+
+
 def _text(value: object) -> str:
     if value is None:
         return ""
@@ -292,9 +299,11 @@ class AdaptiveQuestionPolicy:
         *,
         min_adaptive_candidates: int = MIN_ADAPTIVE_CANDIDATES,
         min_selection_score: float = MIN_SELECTION_SCORE,
+        config: QuestionPolicyConfig | None = None,
     ) -> None:
         self.min_adaptive_candidates = min_adaptive_candidates
         self.min_selection_score = min_selection_score
+        self.config = config or QuestionPolicyConfig()
 
     @staticmethod
     def _representative(candidate: QuestionCandidate, attribute: str) -> str:
@@ -377,6 +386,9 @@ class AdaptiveQuestionPolicy:
         asked_attributes: set[str],
         turn: int,
         guardrail_attribute: str | None = None,
+        other_exhausted: bool = False,
+        projected_attribute: str | None = None,
+        allow_repeated_other: bool = False,
     ) -> QuestionDecision:
         statistics = tuple(
             self._statistics(
@@ -390,6 +402,17 @@ class AdaptiveQuestionPolicy:
         )
         eligible = [item for item in statistics if item.eligible]
 
+        def attribute_available(attribute: str) -> bool:
+            if attribute != "other":
+                return attribute not in asked_attributes
+            if other_exhausted:
+                return False
+            if attribute not in asked_attributes:
+                return True
+            return self.config.repeat_other_until_exhausted and (
+                allow_repeated_other or projected_attribute == "other"
+            )
+
         if turn >= 10:
             selected: str | None = None
             reason = "turn_limit"
@@ -399,9 +422,14 @@ class AdaptiveQuestionPolicy:
         ):
             selected = guardrail_attribute
             reason = "first_turn_guardrail"
+        elif projected_attribute is not None and attribute_available(
+            projected_attribute
+        ):
+            selected = projected_attribute
+            reason = "projection_rollout"
         elif len(candidates) < self.min_adaptive_candidates:
             selected = next(
-                (attribute for attribute in FALLBACK_ORDER if attribute not in asked_attributes),
+                (attribute for attribute in FALLBACK_ORDER if attribute_available(attribute)),
                 None,
             )
             reason = "small_candidate_fallback"
@@ -415,7 +443,7 @@ class AdaptiveQuestionPolicy:
             if best is not None and best.selection_score >= self.min_selection_score:
                 selected = best.attribute
                 reason = "highest_expected_technical_gain"
-            elif "other" not in asked_attributes:
+            elif attribute_available("other"):
                 selected = "other"
                 reason = "specific_facets_below_threshold"
             else:

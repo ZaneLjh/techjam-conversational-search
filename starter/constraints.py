@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field, replace
 from enum import Enum
 
@@ -161,9 +162,10 @@ BRAND_RE = re.compile(r"\b(?:brand|store|maker|manufacturer)\b", re.IGNORECASE)
 
 
 def normalize_value(value: str) -> str:
-    normalized = SPACE_RE.sub(" ", value).strip(" \t\r\n.,;:!?-\"")
+    normalized = unicodedata.normalize("NFKC", str(value))
+    normalized = SPACE_RE.sub(" ", normalized).strip(" \t\r\n.,;:!?-\"")
     normalized = re.sub(r"\bgrey\b", "gray", normalized, flags=re.IGNORECASE)
-    return normalized.lower()
+    return normalized.casefold()
 
 
 def _facet(value: str | Facet | None) -> Facet | None:
@@ -343,6 +345,8 @@ def parse_message(
     message: str,
     turn: int,
     expected_facet: str | Facet | None = None,
+    *,
+    infer_other_facets: bool = False,
 ) -> ParseResult:
     """Parse only customer-visible text; no labels or evaluator state are used."""
 
@@ -563,7 +567,10 @@ def parse_message(
         )
         for positive_value in positive_values:
             direct_answer = payload_match is not None and not is_override
-            facet = infer_facet(positive_value, expected if direct_answer else None)
+            expected_answer = expected if direct_answer else None
+            if infer_other_facets and expected_answer is Facet.OTHER:
+                expected_answer = None
+            facet = infer_facet(positive_value, expected_answer)
             positive = _parsed(
                 facet=facet,
                 value=positive_value,

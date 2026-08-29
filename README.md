@@ -183,6 +183,82 @@ same public gate and then be positive on at least four of five true
 target-product-disjoint folds with no Hit Rate loss. Full E4 remains the
 kill-switch fallback.
 
+## E4.5 provisional intent-card projection
+
+E4.5 is a deterministic, catalog-derived experiment layered on the E4.1
+source tree. Its behavioral predecessor is still frozen full E4: the
+no-argument `Agent()` and `--disable-e4-5` paths do not enable E4.1 or E4.5.
+The E4.5 candidate activates only when explicitly configured with a sidecar
+and manifest built from the exact catalog path and bytes used at evaluation.
+An absent, corrupt, mismatched, oversized, or noncanonical artifact fails
+closed to the complete frozen-E4 turn.
+
+The sidecar contains exact intent-card projections from public catalog fields.
+It supports a bounded category-plus-clue posterior, uniqueness-gated display
+reranking, repeated `other` questions until the exact no-additional reply, and
+question selection over exact rendered-reply partitions. The rollout score is
+a TechnicalScore-shaped expected-utility proxy over deterministic posterior
+order; it is not learned and is not an exact next-turn target-utility estimate.
+Learned rankers, LambdaMART, or Ettin model work remain outside E4.5.
+
+On the released 200-session development set, the fresh frozen-source result is:
+
+| Metric | Frozen E4 | E4.5 candidate | Delta |
+| --- | ---: | ---: | ---: |
+| Hit Rate@10 | 1.000000 | 1.000000 | 0.000000 |
+| MRR | 0.798198 | 0.813317 | +0.015119 |
+| MTTC | 2.410000 | 2.390000 | -0.020000 |
+| TechnicalScore | 0.911259 | 0.916195 | +0.004936 |
+
+The required score delta is `+0.005`. E4.5 falls short by `0.000064`, so its
+promotion decision is **reject** before held-out validation. Public five-slice
+TechnicalScore deltas are `0.000000`, `+0.007929`, `0.000000`, `+0.003750`,
+and `+0.013000`, so only 3/5 are strictly positive. These are consistency
+diagnostics, never cross-validation or deployment evidence. Promotion would
+additionally require non-decreasing Hit Rate, no hit-to-miss transition,
+deterministic/fallback/compliance checks, and positive delta on at least four of
+five true target-product-disjoint held-out folds.
+
+Build the generated artifact from the same plain catalog used by the evaluator,
+then run the candidate explicitly:
+
+```bash
+mkdir -p results
+python -m tools.e4_5_projection_suite \
+  --catalog data/catalog.jsonl \
+  --sidecar results/e4_5_intent_projection.jsonl.gz \
+  --manifest results/e4_5_projection_manifest.json
+python -m tools.evaluate_variant --e4-5-candidate \
+  --catalog data/catalog.jsonl \
+  --projection-sidecar results/e4_5_intent_projection.jsonl.gz \
+  --projection-manifest results/e4_5_projection_manifest.json \
+  --output results/e4_5_candidate.json
+python -m tools.evaluate_variant --e4-5-candidate \
+  --catalog data/catalog.jsonl \
+  --projection-sidecar results/e4_5_intent_projection.jsonl.gz \
+  --projection-manifest results/e4_5_projection_manifest.json \
+  --output results/e4_5_candidate_repeat.json
+cmp results/e4_5_candidate.json results/e4_5_candidate_repeat.json
+python -m tools.evaluate_variant --disable-e4-5 \
+  --output results/e4_5a_e4_fallback.json
+python -m tools.e4_5_ablation_suite \
+  --catalog data/catalog.jsonl \
+  --sidecar results/e4_5_intent_projection.jsonl.gz \
+  --manifest results/e4_5_projection_manifest.json \
+  --output results/e4_5_ablation_suite.json
+python -m tools.e4_5_funnel_report \
+  --catalog data/catalog.jsonl \
+  --sidecar results/e4_5_intent_projection.jsonl.gz \
+  --manifest results/e4_5_projection_manifest.json \
+  --output results/e4_5_candidate_funnel.json
+```
+
+The sidecar itself is a reproducible build product and is not intended for the
+source patch. Runtime validation binds its exact bytes and canonical JSONL
+content to the catalog and manifest, enforces explicit size/row limits, and
+rejects extra gzip members. Manifest `compression_level: 9` records build
+provenance; it is not a cryptographic proof of the DEFLATE encoder setting.
+
 ## Agent Interface
 
 ```python
@@ -240,6 +316,10 @@ tools/e4_ablation_suite.py        fixed E4 component-ablation matrix
 tools/e4_1_ablation_suite.py      E4.1 strict/gate/route interaction matrix
 tools/e4_1_compliance_suite.py    deterministic compatibility probes
 tools/e4_1_funnel_report.py       public-only candidate/oracle diagnostics
+starter/projection.py             E4.5 exact projection and bounded rollout
+tools/e4_5_projection_suite.py    deterministic sidecar build/parity audit
+tools/e4_5_ablation_suite.py      fixed E4.5 projection/rollout matrix
+tools/e4_5_funnel_report.py       E4.5 activation and posterior diagnostics
 tools/promotion_gate.py           fail-closed public/held-out promotion gate
 tools/paired_report.py             paired per-session utility comparison
 tools/fold_report.py              scenario-stratified stability report

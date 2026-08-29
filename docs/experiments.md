@@ -622,3 +622,122 @@ checks, and positive TechnicalScore delta on at least four of five true
 target-product-disjoint folds. Complete E4.1 currently fails the score-delta and
 public-slice gates, so the promotion decision is **reject** before held-out
 validation is even considered. Frozen E4 remains the deployment configuration.
+
+## E4.5 - Deterministic intent-card projection
+
+Base behavior: frozen full E4. Source application point: the E4.1 tree.
+
+E4.5 projects each catalog row through the released intent-card transform and
+stores exact raw clues beside domain-separated SHA-256 fingerprints. The build
+suite checks all 50,000 rows against the released transform, category
+projection, clue classifier, and generated customer replies. The production
+loader independently reproduces every canonical JSONL record from the bound
+catalog before activating either experimental component.
+
+The runtime uses the projection only when an exact category plus at least one
+exact active clue yields a nonempty posterior of at most 100 products. The
+default display reranker is stricter: it reorders only a unique posterior.
+Candidate construction is display-first, unique, and capped at 100; the full
+bounded union is scored before the cap and frozen-E4 order breaks observational
+ties. If ranking is skipped, the pool is predecessor recommendations, projected
+posterior, then the predecessor remainder.
+
+Question rollout partitions the bounded posterior by the exact rendered reply,
+not by an internal raw tuple. This prevents values containing semicolons from
+creating fictitious information gain. The numerical score is a
+TechnicalScore-shaped expected-utility proxy with deterministic `1/sqrt(rank)`
+prior weights. It is not learned, not an exact next-turn target-utility
+calculation, and not a claim of calibrated posterior probability. Repeated
+`other` questions remain eligible until the exact no-additional-preference
+reply. The frozen first-turn guardrail and turn-ten limit remain in force.
+
+### Isolation and failure behavior
+
+- `Agent()` uses `e4_fallback_config()` and projection disabled by default.
+- E4.5 never consumes public labels, scenario types, evaluator state, network,
+  model output, or secrets in production code.
+- The frozen ledger remains the input to E4 retrieval. A separate projection
+  ledger permits opt-in `other`-answer facet inference without contaminating
+  predecessor state.
+- Exact disclosure tracking preserves duplicate raw clues, semicolons, Unicode,
+  and HTML-like values. Ambiguous or case-altered protocol messages fail closed.
+- A reranking or rollout exception rolls the complete visible turn back to
+  predecessor identifiers, shown-state bookkeeping, and question decision.
+- Missing/tampered artifacts, duplicate JSON keys, non-finite JSON, padded or
+  non-string IDs, catalog mismatch, noncanonical rows, extra gzip members, and
+  configured resource-limit violations all disable projection before use.
+
+The loader bounds the manifest to 1 MiB, compressed sidecar to 32 MiB,
+uncompressed sidecar and catalog content to 64 MiB each, catalog rows to 50,000,
+and individual catalog/sidecar rows to 16 KiB. It recomputes parity and collision
+summary facts represented in the manifest. The recorded gzip compression level
+is deterministic build provenance, not an authenticated DEFLATE property; the
+runtime guarantee is a bounded single-member stream whose exact canonical JSONL
+reproduces the bound catalog.
+
+### Frozen-source public result
+
+| Variant | HR@10 | MRR | MTTC | TechnicalScore | Delta vs E4 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Frozen E4 | 1.000000 | 0.798198 | 2.410000 | 0.911259 | 0.000000 |
+| Complete E4.5 | 1.000000 | 0.813317 | 2.390000 | 0.916195 | +0.004936 |
+
+Two independent catalog builds are byte-identical. Each manifest records 50,000
+rows, 197,857 classifier checks, 600,000 rollout checks, zero parity mismatches,
+and zero true SHA-256 collisions. Two complete candidate evaluations are also
+byte-identical. These are reproducibility checks, not hidden-set evidence.
+
+The fixed ablation matrix separates ranking and question effects while reusing
+one validated projection index:
+
+| Variant | HR@10 | MRR | MTTC | TechnicalScore | Delta vs E4 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Complete E4.5 | 1.000000 | 0.813317 | 2.390000 | 0.916195 | +0.004936 |
+| Projection ranking only | 1.000000 | 0.813317 | 2.400000 | 0.915995 | +0.004736 |
+| Question rollout only | 1.000000 | 0.800698 | 2.410000 | 0.912009 | +0.000750 |
+| Posterior at most 10 diagnostic | 1.000000 | 0.782579 | 2.300000 | 0.908774 | -0.002485 |
+
+Against frozen E4, the complete candidate has 7 improved, 0 regressed, and 193
+tied sessions, with zero hit-to-miss transitions. The posterior-at-most-10
+diagnostic is intentionally not the default: it has 14 improvements but 15
+regressions and a negative aggregate delta.
+
+E4.5 misses the required `+0.005` TechnicalScore delta by `0.000064`; therefore
+its promotion decision is **reject** before held-out validation. As with E4.1,
+the five public scenario-stratified TechnicalScore deltas are `0.000000`,
+`+0.007929`, `0.000000`, `+0.003750`, and `+0.013000`: 3/5 are strictly
+positive, below the required 4/5. These slices are consistency diagnostics
+only. They are not cross-validation or target-product-disjoint held-out folds.
+
+### Reproduction
+
+```bash
+python -m compileall -q starter tests tools
+python -m unittest discover -v
+python -m tools.e4_5_projection_suite \
+  --catalog data/catalog.jsonl \
+  --sidecar results/e4_5_intent_projection.jsonl.gz \
+  --manifest results/e4_5_projection_manifest.json
+python -m tools.evaluate_variant --e4-5-candidate \
+  --catalog data/catalog.jsonl \
+  --projection-sidecar results/e4_5_intent_projection.jsonl.gz \
+  --projection-manifest results/e4_5_projection_manifest.json \
+  --output results/e4_5_candidate.json
+python -m tools.evaluate_variant --disable-e4-5 \
+  --output results/e4_5a_e4_fallback.json
+python -m tools.e4_5_ablation_suite \
+  --catalog data/catalog.jsonl \
+  --sidecar results/e4_5_intent_projection.jsonl.gz \
+  --manifest results/e4_5_projection_manifest.json \
+  --output results/e4_5_ablation_suite.json
+python -m tools.e4_5_funnel_report \
+  --catalog data/catalog.jsonl \
+  --sidecar results/e4_5_intent_projection.jsonl.gz \
+  --manifest results/e4_5_projection_manifest.json \
+  --output results/e4_5_candidate_funnel.json
+```
+
+Build and evaluate against the same `data/catalog.jsonl` path and bytes. A
+manifest built from `catalog.jsonl.gz` is intentionally not interchangeable
+with the plain JSONL evaluator input. The generated sidecar should not be
+committed; preserve its manifest and repeatability hashes as evidence.

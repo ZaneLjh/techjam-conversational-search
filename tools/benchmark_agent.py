@@ -10,6 +10,7 @@ from pathlib import Path
 
 from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 from starter.agent import Agent
+from starter.projection import ProjectionConfig
 from starter.retrieval import (
     RetrievalConfig,
     e4_1_candidate_config,
@@ -33,9 +34,14 @@ class TimedAgent:
         self,
         catalog_path: str | Path,
         retrieval_config: RetrievalConfig | None = None,
+        projection_config: ProjectionConfig | None = None,
     ) -> None:
         started = time.perf_counter()
-        self.agent = Agent(catalog_path, retrieval_config=retrieval_config)
+        self.agent = Agent(
+            catalog_path,
+            retrieval_config=retrieval_config,
+            projection_config=projection_config,
+        )
         self.startup_seconds = time.perf_counter() - started
         self.response_seconds: list[float] = []
 
@@ -73,18 +79,41 @@ def main() -> None:
         action="store_true",
         help="Benchmark the complete E4.1 experiment instead of frozen E4.",
     )
+    parser.add_argument(
+        "--e4-5-candidate",
+        action="store_true",
+        help="Benchmark the complete E4.5 experiment instead of frozen E4.",
+    )
+    parser.add_argument(
+        "--disable-e4-5",
+        action="store_true",
+        help="Benchmark the E4.5 master-kill-switch fallback.",
+    )
+    parser.add_argument(
+        "--projection-sidecar",
+        default="results/e4_5_intent_projection.jsonl.gz",
+    )
+    parser.add_argument(
+        "--projection-manifest",
+        default="results/e4_5_projection_manifest.json",
+    )
     args = parser.parse_args()
 
     samples = load_jsonl(args.dataset)
     catalog_ids, categories, products = catalog_index(args.catalog)
     selected = (
         e4_1_candidate_config()
-        if args.e4_1_candidate
+        if args.e4_1_candidate and not args.e4_5_candidate
         else e4_fallback_config()
     )
     agent = TimedAgent(
         args.catalog,
         replace(selected, enabled=not args.disable_multi_route_ranking),
+        ProjectionConfig(
+            enabled=args.e4_5_candidate and not args.disable_e4_5,
+            sidecar_path=args.projection_sidecar,
+            manifest_path=args.projection_manifest,
+        ),
     )
     evaluation_started = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)
