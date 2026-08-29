@@ -5,11 +5,16 @@ import json
 import statistics
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 from starter.agent import Agent
-from starter.retrieval import RetrievalConfig
+from starter.retrieval import (
+    RetrievalConfig,
+    e4_1_candidate_config,
+    e4_fallback_config,
+)
 
 try:
     import resource
@@ -63,13 +68,23 @@ def main() -> None:
         action="store_true",
         help="Benchmark the E3 compatibility path.",
     )
+    parser.add_argument(
+        "--e4-1-candidate",
+        action="store_true",
+        help="Benchmark the complete E4.1 experiment instead of frozen E4.",
+    )
     args = parser.parse_args()
 
     samples = load_jsonl(args.dataset)
     catalog_ids, categories, products = catalog_index(args.catalog)
+    selected = (
+        e4_1_candidate_config()
+        if args.e4_1_candidate
+        else e4_fallback_config()
+    )
     agent = TimedAgent(
         args.catalog,
-        RetrievalConfig(enabled=not args.disable_multi_route_ranking),
+        replace(selected, enabled=not args.disable_multi_route_ranking),
     )
     evaluation_started = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)

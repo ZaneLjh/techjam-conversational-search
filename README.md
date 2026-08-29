@@ -117,6 +117,72 @@ of that same development set; it is not cross-validation or held-out
 validation. See `docs/experiments.md` for the fusion formula, controlled
 ablations, scenario results, performance, and limitations.
 
+## E4.1 provisional compliance repair
+
+E4.1 adds a three-state compatibility check (exact, unknown, mismatch), keeps
+price evidence soft, advances non-empty partial strict pages, and exposes a
+bounded candidate pool for funnel diagnostics. It also implements the proposed
+strict-front/recall-backfill cascade and confidence-gated auxiliary fusion.
+The frozen E3 ledger and question-policy path remains unchanged.
+
+On the released 200-session development set, the complete E4.1 configuration
+preserves Hit Rate and improves MRR slightly, but does not clear its promotion
+threshold:
+
+| Metric | Frozen E4 | E4.1 candidate | Delta |
+| --- | ---: | ---: | ---: |
+| Hit Rate@10 | 1.000000 | 1.000000 | 0.000000 |
+| MRR | 0.798198 | 0.807163 | +0.008965 |
+| MTTC | 2.410000 | 2.420000 | +0.010000 |
+| TechnicalScore | 0.911259 | 0.913749 | +0.002490 |
+
+The required score delta is `+0.005`; only three of five public consistency
+slices are positive, and those slices are not product-held-out validation.
+Therefore the E4.1 promotion decision is **reject**. `Agent()` still defaults to
+the byte-compatible frozen E4 configuration. E4.1 is enabled only by an
+explicit experiment configuration. The strict-only configuration is retained
+as a diagnostic, not mislabeled as a promotable UNKNOWN-neutral policy.
+
+```bash
+python -m compileall -q starter tests tools
+python -m unittest discover -v
+python -m tools.evaluate_variant --e4-1-candidate \
+  --output results/e4_1_strict_front.json
+python -m tools.evaluate_variant --e4-1-candidate \
+  --output results/e4_1_strict_front_repeat.json
+cmp results/e4_1_strict_front.json \
+  results/e4_1_strict_front_repeat.json
+python -m tools.evaluate_variant --e4-1-strict-only-diagnostic \
+  --output results/e4_1_strict_only_diagnostic.json
+python -m tools.evaluate_variant --disable-e4-1 \
+  --output results/e4_1a_e4_fallback.json
+cmp results/e4_multi_route_reranking.json \
+  results/e4_1a_e4_fallback.json
+python -m tools.e4_1_compliance_suite \
+  --output results/e4_1_compliance_suite.json
+python -m tools.e4_1_ablation_suite \
+  --output results/e4_1_ablation_suite.json
+python -m tools.e4_1_funnel_report \
+  --output results/e4_1_candidate_funnel.json
+python -m tools.fold_report \
+  --baseline results/e4_multi_route_reranking.json \
+  --candidate results/e4_1_strict_front.json --folds 5 \
+  --output results/e4_1_vs_e4_public_folds.json
+python -m tools.promotion_gate \
+  --baseline results/e4_multi_route_reranking.json \
+  --candidate results/e4_1_strict_front.json \
+  --candidate-repeat results/e4_1_strict_front_repeat.json \
+  --fold-report results/e4_1_vs_e4_public_folds.json \
+  --compliance-report results/e4_1_compliance_suite.json \
+  --fallback-result results/e4_1a_e4_fallback.json \
+  --output results/e4_1_promotion_gate.json
+```
+
+Do not call E4.1 deployed or promoted. A future revision must first clear the
+same public gate and then be positive on at least four of five true
+target-product-disjoint folds with no Hit Rate loss. Full E4 remains the
+kill-switch fallback.
+
 ## Agent Interface
 
 ```python
@@ -150,13 +216,11 @@ TechnicalScore = 0.50 × HitRate@10 + 0.30 × MRR + 0.20 × Efficiency
 Efficiency = clip((11 - MTTC) / 10, 0, 1)
 ```
 
-`TechnicalScore` is an objective input to the `Technical Execution` assessment. It is not a separate judging criterion and does not represent the entire `Technical Execution` score.
-
 Only exact `parent_asin` equality produces a hit. Core metrics are also reported by scenario.
 
 ## Model Choice and Cost
 
-Teams may use any legally accessible LLM API or local model. Teams manage their own credentials and must never commit API keys. Model choice, estimated cost, token usage, and latency must be disclosed. Token usage is a feasibility metric, not part of the core technical score. The organizer does not provide or reimburse model API credits; teams are responsible for any costs incurred through optional external services.
+Teams may use any legally accessible LLM API or local model. Teams manage their own credentials and must never commit API keys. Model choice, estimated cost, token usage, and latency must be disclosed. Token usage is a feasibility metric, not part of the core technical score. The organizer may reimburse model costs through prizes instead of issuing API keys.
 
 ## Files
 
@@ -173,6 +237,10 @@ starter/retrieval.py              bounded routes, exact index, fusion, and reran
 evaluator/local_evaluator.py      public-set simulator and scorer
 tools/evaluate_variant.py         single-switch E2/E4 variant runner
 tools/e4_ablation_suite.py        fixed E4 component-ablation matrix
+tools/e4_1_ablation_suite.py      E4.1 strict/gate/route interaction matrix
+tools/e4_1_compliance_suite.py    deterministic compatibility probes
+tools/e4_1_funnel_report.py       public-only candidate/oracle diagnostics
+tools/promotion_gate.py           fail-closed public/held-out promotion gate
 tools/paired_report.py             paired per-session utility comparison
 tools/fold_report.py              scenario-stratified stability report
 tools/benchmark_agent.py          latency and resource benchmark
@@ -181,6 +249,7 @@ tools/benchmark_agent.py          latency and resource benchmark
 ## Judging and Submission Policy
 
 - Participant submission requirements: `docs/submission_rules.md`
+- Participant release checklist: `docs/participant_release_checklist.md`
 - Organizer-only final judging controls: `organizer/JUDGING_RUNBOOK.md`
 - Organizer private release checklist: `organizer/private_release_checklist.md`
 - Judging day operations SOP: `organizer/JUDGING_DAY_SOP.md`

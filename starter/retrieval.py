@@ -5,7 +5,15 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from starter.constraints import Constraint, Facet, Polarity, Strength
+from starter.constraints import (
+    COLOR_RE,
+    MATERIAL_RE,
+    Constraint,
+    Facet,
+    Polarity,
+    Strength,
+    infer_facet,
+)
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -27,7 +35,7 @@ GENERIC_CATEGORIES = {
 
 @dataclass(frozen=True)
 class RetrievalConfig:
-    """Declared E4 switches shared by production and controlled ablations."""
+    """Declared E4/E4.1 switches shared by production and ablations."""
 
     enabled: bool = True
     use_current_turn_route: bool = True
@@ -36,6 +44,9 @@ class RetrievalConfig:
     use_facet_route: bool = True
     use_constraint_reranking: bool = True
     use_soft_relaxation: bool = True
+    use_strict_front: bool = True
+    use_auxiliary_confidence_gate: bool = True
+    relaxed_backfill_slots: int = 2
     candidate_union_depth: int = 100
     route_depth: int = 200
     max_facet_constraints: int = 4
@@ -50,6 +61,8 @@ class RetrievalConfig:
             raise ValueError("max_facet_constraints must be positive")
         if self.rrf_k <= 0:
             raise ValueError("rrf_k must be positive")
+        if not 0 <= self.relaxed_backfill_slots <= 2:
+            raise ValueError("relaxed_backfill_slots must be between 0 and 2")
         if self.enabled and not any(
             (
                 self.use_current_turn_route,
@@ -59,6 +72,27 @@ class RetrievalConfig:
             )
         ):
             raise ValueError("at least one retrieval route must be enabled")
+
+
+def e4_fallback_config() -> RetrievalConfig:
+    """Return the frozen full-E4 ranking configuration."""
+
+    return RetrievalConfig(
+        use_strict_front=False,
+        use_auxiliary_confidence_gate=False,
+    )
+
+
+def e4_1_candidate_config() -> RetrievalConfig:
+    """Return the complete E4.1 strict-front/recall-backfill experiment."""
+
+    return RetrievalConfig()
+
+
+def e4_1_strict_only_config() -> RetrievalConfig:
+    """Return the public-only strict diagnostic; not a promotable E4.1 policy."""
+
+    return RetrievalConfig(use_soft_relaxation=False)
 
 
 @dataclass(frozen=True)
@@ -73,6 +107,7 @@ class RouteSpec:
 @dataclass(frozen=True)
 class RetrievalResult:
     recommendation_ids: tuple[str, ...]
+    candidate_ids: tuple[str, ...]
     trace: dict
 
 
@@ -81,10 +116,16 @@ class _Candidate:
     parent_asin: str
     route_ranks: dict[str, int]
     fusion_score: float = 0.0
+    facet_fusion_score: float = 0.0
+    auxiliary_fusion_score: float = 0.0
+    gated_fusion_score: float = 0.0
     exact_coverage: float = 0.0
     current_turn_exact_coverage: float = 0.0
     normalized_fusion_score: float = 0.0
+    evidence_confidence: float = 0.0
     strict: bool = False
+    unknown_must_count: int = 0
+    mismatched_must_count: int = 0
 
 
 def _raw_terms(text: str) -> list[str]:
@@ -186,6 +227,53 @@ def retrieval_index_rows(
                     lookups.append((alias, parent_asin))
                     seen.add(alias)
     return meta, lookups
+
+
+def retrieval_presence_rows(product: Mapping[str, object]) -> list[tuple[str, str]]:
+    """Return catalog-observable facet-presence rows for UNKNOWN handling.
+
+    Presence is deliberately weaker than a match.  A candidate lacking any
+    observable value for a routed facet is UNKNOWN and remains neutral; a
+    candidate with observable evidence that does not match is a mismatch.
+    Price is represented as budget evidence only when a usable value exists.
+    """
+
+    parent_asin = str(product["parent_asin"])
+    facets = {
+        Facet(facet)
+        for _, facet, _ in retrieval_facet_value_rows(product)
+    }
+    if product.get("categories"):
+        facets.add(Facet.CATEGORY)
+    return [(parent_asin, facet.value) for facet in sorted(facets, key=lambda item: item.value)]
+
+
+def retrieval_facet_value_rows(
+    product: Mapping[str, object],
+) -> list[tuple[str, str, str]]:
+    """Return auditable facet/value evidence used only for compatibility.
+
+    Whole catalog scalars retain E4's equality semantics. Material and color
+    tokens also receive canonical rows so a visible structured clue such as
+    ``leather`` is compatible with a catalog scalar such as ``100% Leather``.
+    These rows do not add retrieval routes, preserving frozen-E4 ranking.
+    """
+
+    parent_asin = str(product["parent_asin"])
+    rows: set[tuple[str, str, str]] = set()
+    for scalar in _scalar_values(product):
+        compact = re.sub(r"\s+", " ", scalar).strip(" -;,.\t\n")
+        facet = infer_facet(compact)
+        for alias in _normalization_aliases(compact):
+            if alias:
+                rows.add((parent_asin, facet.value, alias))
+        for match in MATERIAL_RE.finditer(compact):
+            rows.add((parent_asin, Facet.MATERIAL.value, _catalog_norm(match.group(0))))
+        for match in COLOR_RE.finditer(compact):
+            normalized = _catalog_norm(match.group(0))
+            for alias in _normalization_aliases(normalized):
+                rows.add((parent_asin, Facet.COLOR.value, alias))
+    return sorted(rows, key=lambda row: (row[1], row[2]))
 
 
 def has_focused_evidence(constraints: Sequence[Constraint]) -> bool:
@@ -340,6 +428,31 @@ class MultiRouteRetriever:
     def _eligible_ranked(ranked: Sequence[str], shown_ids: set[str]) -> list[str]:
         return [parent_asin for parent_asin in ranked if parent_asin not in shown_ids]
 
+    def _facet_values(
+        self,
+        identifiers: Sequence[str],
+    ) -> dict[str, dict[str, set[str]]]:
+        """Load bounded compatibility evidence without SQLite bind overflow."""
+
+        values: dict[str, dict[str, set[str]]] = {
+            str(identifier): {} for identifier in identifiers
+        }
+        for start in range(0, len(identifiers), 500):
+            chunk = [str(identifier) for identifier in identifiers[start : start + 500]]
+            if not chunk:
+                continue
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.connection.execute(
+                "SELECT parent_asin, facet, lookup_norm FROM retrieval_facet_values "
+                f"WHERE parent_asin IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for parent_asin, facet, lookup_norm in rows:
+                values.setdefault(str(parent_asin), {}).setdefault(
+                    str(facet), set()
+                ).add(str(lookup_norm))
+        return values
+
     def search(
         self,
         *,
@@ -353,6 +466,12 @@ class MultiRouteRetriever:
     ) -> RetrievalResult:
         if avoid_values:
             raise ValueError("E4 retrieval expects the exclusion-safe E3 fallback")
+        requested_k = min(requested_k, self.config.candidate_union_depth)
+        prior_miss = bool(shown_ids)
+        effective_relaxed_slots = min(
+            self.config.relaxed_backfill_slots,
+            self.config.relaxed_backfill_slots if prior_miss else 1,
+        )
         specs = _route_specs(constraints, turn, self.config)
         positive = _positive_constraints(constraints)
         noncategory = [item for item in positive if item.facet is not Facet.CATEGORY]
@@ -401,7 +520,12 @@ class MultiRouteRetriever:
             for rank, parent_asin in enumerate(ranked, start=1):
                 candidate = candidates.setdefault(parent_asin, _Candidate(parent_asin, {}))
                 candidate.route_ranks[name] = rank
-                candidate.fusion_score += weight / (self.config.rrf_k + rank)
+                contribution = weight / (self.config.rrf_k + rank)
+                candidate.fusion_score += contribution
+                if family == "facet":
+                    candidate.facet_fusion_score += contribution
+                else:
+                    candidate.auxiliary_fusion_score += contribution
             route_traces.append(
                 {
                     "name": name,
@@ -413,51 +537,98 @@ class MultiRouteRetriever:
             )
 
         max_fusion = max((item.fusion_score for item in candidates.values()), default=1.0)
+        # Price is always soft in E4.1. Missing or inconsistent price metadata
+        # must never turn an otherwise compatible parent product into a hard
+        # violation.
         routed_must = [
             item
             for item in facet_items
-            if item.strength is Strength.MUST and self.config.use_facet_route
+            if (
+                item.strength is Strength.MUST
+                and item.facet is not Facet.BUDGET
+                and self.config.use_facet_route
+            )
         ]
+        facet_values = self._facet_values(tuple(candidates))
         for candidate in candidates.values():
             exact_matches = 0
             current_matches = 0
             strict_matches: list[bool] = []
+            unknown_must_count = 0
+            mismatched_must_count = 0
+            # Confidence only covers constraints that actually received exact
+            # routes. Older ledger evidence is still useful for recall, but it
+            # cannot dilute this bounded exact-evidence denominator.
+            confidence_items = [
+                item for item in facet_items if item.facet is not Facet.BUDGET
+            ]
             for item in noncategory:
-                exact = any(
-                    route_name in candidate.route_ranks
-                    for route_name in (
-                        f"facet_exact:{item.constraint_id}",
-                        f"facet_category_exact:{item.constraint_id}",
-                    )
+                observed_values = facet_values.get(candidate.parent_asin, {}).get(
+                    item.facet.value, set()
                 )
-                exact_matches += int(exact)
-                if exact and item.source_turn == turn:
-                    current_matches += 1
+                aliases = {
+                    *_normalization_aliases(item.raw_value),
+                    *_normalization_aliases(item.normalized_value),
+                }
+                exact = bool(observed_values.intersection(aliases))
+                if item in confidence_items:
+                    exact_matches += int(exact)
+                    if exact and item.source_turn == turn:
+                        current_matches += 1
                 if item in routed_must:
+                    known = bool(observed_values)
+                    if not exact and not known:
+                        unknown_must_count += 1
+                    elif not exact:
+                        mismatched_must_count += 1
+                    # UNKNOWN remains eligible and unpenalized, but only a
+                    # confirmed exact match belongs in the strict front.
                     strict_matches.append(exact)
             candidate.exact_coverage = (
-                exact_matches / len(noncategory) if noncategory else 0.0
+                exact_matches / len(confidence_items) if confidence_items else 0.0
             )
-            current_count = sum(item.source_turn == turn for item in noncategory)
+            current_count = sum(item.source_turn == turn for item in confidence_items)
             candidate.current_turn_exact_coverage = (
                 current_matches / current_count if current_count else 0.0
             )
             candidate.normalized_fusion_score = (
                 candidate.fusion_score / max_fusion if max_fusion else 0.0
             )
+            candidate.evidence_confidence = candidate.exact_coverage
+            gate = 0.15 + 0.85 * candidate.evidence_confidence
+            mismatch_gate = 0.50 ** mismatched_must_count
+            candidate.gated_fusion_score = (
+                candidate.facet_fusion_score
+                + candidate.auxiliary_fusion_score * gate * mismatch_gate
+            )
             candidate.strict = bool(strict_matches) and all(strict_matches)
+            candidate.unknown_must_count = unknown_must_count
+            candidate.mismatched_must_count = mismatched_must_count
 
         strict_count = sum(item.strict for item in candidates.values())
         if self.config.use_constraint_reranking:
-            ranked_candidates = sorted(
-                candidates.values(),
-                key=lambda item: (
-                    -item.fusion_score,
-                    item.route_ranks.get("ledger", 10**9),
-                    min(item.route_ranks.values()),
-                    item.parent_asin,
-                ),
-            )
+            if self.config.use_auxiliary_confidence_gate:
+                ranked_candidates = sorted(
+                    candidates.values(),
+                    key=lambda item: (
+                        -item.gated_fusion_score,
+                        -item.current_turn_exact_coverage,
+                        -item.exact_coverage,
+                        item.route_ranks.get("ledger", 10**9),
+                        min(item.route_ranks.values()),
+                        item.parent_asin,
+                    ),
+                )
+            else:
+                ranked_candidates = sorted(
+                    candidates.values(),
+                    key=lambda item: (
+                        -item.fusion_score,
+                        item.route_ranks.get("ledger", 10**9),
+                        min(item.route_ranks.values()),
+                        item.parent_asin,
+                    ),
+                )
         else:
             ranked_candidates = sorted(
                 candidates.values(),
@@ -467,10 +638,95 @@ class MultiRouteRetriever:
                     item.parent_asin,
                 ),
             )
+        route_ranked_candidates = list(ranked_candidates)
         if routed_must and strict_count and not self.config.use_soft_relaxation:
             ranked_candidates = [item for item in ranked_candidates if item.strict]
-        bounded = ranked_candidates[: self.config.candidate_union_depth]
-        recommendation_candidates = bounded[:requested_k]
+        strict_front_applied = bool(
+            self.config.use_strict_front
+            and routed_must
+            and strict_count
+            and self.config.use_soft_relaxation
+        )
+        if strict_front_applied:
+            strict_candidates = [item for item in ranked_candidates if item.strict]
+            relaxed_candidates = [item for item in ranked_candidates if not item.strict]
+            pool_relaxed = min(
+                effective_relaxed_slots,
+                len(relaxed_candidates),
+                self.config.candidate_union_depth,
+            )
+            bounded = [
+                *strict_candidates[: self.config.candidate_union_depth - pool_relaxed],
+                *relaxed_candidates[:pool_relaxed],
+            ]
+            if len(bounded) < self.config.candidate_union_depth:
+                used = {item.parent_asin for item in bounded}
+                bounded.extend(
+                    item
+                    for item in [*strict_candidates, *relaxed_candidates]
+                    if item.parent_asin not in used
+                )
+                bounded = bounded[: self.config.candidate_union_depth]
+        else:
+            strict_candidates = []
+            relaxed_candidates = []
+            bounded = ranked_candidates[: self.config.candidate_union_depth]
+
+        broader_relaxation = False
+        if strict_front_applied:
+            # A strict candidate always owns the leading slot. Relaxed safety
+            # slots are lower-ranked recovery positions, never the whole page.
+            reserved = min(effective_relaxed_slots, max(0, requested_k - 1))
+            strict_target = requested_k - reserved
+            if len(strict_candidates) >= strict_target:
+                recommendation_candidates = [
+                    *strict_candidates[:strict_target],
+                    *relaxed_candidates[:reserved],
+                ]
+                if len(recommendation_candidates) < requested_k:
+                    used = {item.parent_asin for item in recommendation_candidates}
+                    recommendation_candidates.extend(
+                        item
+                        for item in strict_candidates
+                        if item.parent_asin not in used
+                    )
+            else:
+                broader_relaxation = True
+                recommendation_candidates = [
+                    *strict_candidates,
+                    *relaxed_candidates[: requested_k - len(strict_candidates)],
+                ]
+            recommendation_candidates = recommendation_candidates[:requested_k]
+        else:
+            broader_relaxation = bool(routed_must and not strict_count)
+            recommendation_candidates = bounded[:requested_k]
+        if strict_front_applied:
+            used = {item.parent_asin for item in recommendation_candidates}
+            bounded = [
+                *recommendation_candidates,
+                *(
+                    item
+                    for item in [*strict_candidates, *relaxed_candidates]
+                    if item.parent_asin not in used
+                ),
+            ][: self.config.candidate_union_depth]
+        eligible_candidate_ids = [item.parent_asin for item in bounded]
+        recommendation_ids = [
+            item.parent_asin for item in recommendation_candidates
+        ]
+        used_candidate_ids = set(recommendation_ids)
+        candidate_ids = [
+            *recommendation_ids,
+            *(
+                item.parent_asin
+                for item in route_ranked_candidates
+                if item.parent_asin not in used_candidate_ids
+            ),
+        ][: self.config.candidate_union_depth]
+        route_candidate_ids = [
+            item.parent_asin
+            for item in route_ranked_candidates[: self.config.candidate_union_depth]
+        ]
         enabled_families = [
             family
             for family in ROUTE_FAMILY_ORDER
@@ -481,7 +737,14 @@ class MultiRouteRetriever:
             "enabled_route_families": enabled_families,
             "routes": route_traces,
             "raw_union_count": len(candidates),
-            "candidate_union_count": len(bounded),
+            "candidate_union_count": len(candidate_ids),
+            "candidate_ids": candidate_ids,
+            "route_candidate_count": len(route_candidate_ids),
+            "route_candidate_ids": route_candidate_ids,
+            "eligible_candidate_count": len(eligible_candidate_ids),
+            "eligible_candidate_ids": eligible_candidate_ids,
+            "recommendation_count": len(recommendation_ids),
+            "recommendation_ids": recommendation_ids,
             "ranked_candidate_count": len(ranked_candidates),
             "strict_candidate_count": strict_count,
             "relaxed_candidates_used": (
@@ -492,6 +755,16 @@ class MultiRouteRetriever:
             "routed_must_constraint_count": len(routed_must),
             "constraint_reranking": self.config.use_constraint_reranking,
             "soft_relaxation": self.config.use_soft_relaxation,
+            "strict_front": self.config.use_strict_front,
+            "strict_front_applied": strict_front_applied,
+            "configured_relaxed_backfill_slots": self.config.relaxed_backfill_slots,
+            "effective_relaxed_backfill_slots": effective_relaxed_slots,
+            "prior_miss": prior_miss,
+            "recovery_expanded_after_miss": bool(
+                prior_miss and effective_relaxed_slots > 1
+            ),
+            "broader_relaxation": broader_relaxation,
+            "auxiliary_confidence_gate": self.config.use_auxiliary_confidence_gate,
             "top_candidates": [
                 {
                     "parent_asin": item.parent_asin,
@@ -503,13 +776,18 @@ class MultiRouteRetriever:
                     "normalized_fusion_score": round(
                         item.normalized_fusion_score, 9
                     ),
+                    "gated_fusion_score": round(item.gated_fusion_score, 12),
+                    "evidence_confidence": round(item.evidence_confidence, 9),
                     "strict": item.strict,
+                    "unknown_must_count": item.unknown_must_count,
+                    "mismatched_must_count": item.mismatched_must_count,
                     "route_ranks": dict(sorted(item.route_ranks.items())),
                 }
-                for item in bounded[:10]
+                for item in recommendation_candidates
             ],
         }
         return RetrievalResult(
-            tuple(item.parent_asin for item in recommendation_candidates),
+            tuple(recommendation_ids),
+            tuple(candidate_ids),
             trace,
         )

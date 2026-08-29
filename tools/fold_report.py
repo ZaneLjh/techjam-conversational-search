@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import statistics
 from collections import defaultdict
@@ -18,6 +19,14 @@ METRIC_NAMES = (
 
 def load_result(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def summarize(sessions: list[dict]) -> dict:
@@ -130,6 +139,14 @@ def main() -> None:
         load_result(args.candidate),
         args.folds,
     )
+    report["provenance"] = {
+        "evaluation_role": "public_consistency",
+        "split_unit": "public_session",
+        "held_out": False,
+        "target_product_disjoint": False,
+        "baseline_sha256": sha256_file(args.baseline),
+        "candidate_sha256": sha256_file(args.candidate),
+    }
     rendered = json.dumps(report, indent=2) + "\n"
     if args.output:
         Path(args.output).write_text(rendered, encoding="utf-8")

@@ -15,8 +15,11 @@ from starter.question_policy import (
 from starter.retrieval import (
     MultiRouteRetriever,
     RetrievalConfig,
+    e4_fallback_config,
     has_focused_evidence,
     retrieval_index_rows,
+    retrieval_facet_value_rows,
+    retrieval_presence_rows,
 )
 
 
@@ -158,7 +161,10 @@ class Agent:
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.explore_unseen = explore_unseen
-        self.retrieval_config = retrieval_config or RetrievalConfig()
+        # E4.1 remains a provisional experiment until true product-disjoint
+        # validation. Applying the patch therefore preserves full E4 by
+        # default; experiment tools pass the E4.1 candidate explicitly.
+        self.retrieval_config = retrieval_config or e4_fallback_config()
         self.connection = sqlite3.connect(":memory:")
         self._sessions: dict[str, SessionState] = {}
         self.question_policy = AdaptiveQuestionPolicy()
@@ -187,10 +193,23 @@ class Agent:
                 "lookup_norm TEXT NOT NULL, parent_asin TEXT NOT NULL, "
                 "PRIMARY KEY(lookup_norm, parent_asin)) WITHOUT ROWID"
             )
+            cursor.execute(
+                "CREATE TABLE retrieval_facet_presence("
+                "parent_asin TEXT NOT NULL, facet TEXT NOT NULL, "
+                "PRIMARY KEY(parent_asin, facet)) WITHOUT ROWID"
+            )
+            cursor.execute(
+                "CREATE TABLE retrieval_facet_values("
+                "parent_asin TEXT NOT NULL, facet TEXT NOT NULL, "
+                "lookup_norm TEXT NOT NULL, "
+                "PRIMARY KEY(parent_asin, facet, lookup_norm)) WITHOUT ROWID"
+            )
         batch: list[tuple[str, str, str, str, str, str, str]] = []
         question_batch: list[tuple[str, str]] = []
         retrieval_meta_batch: list[tuple[str, str, float, int]] = []
         retrieval_value_batch: list[tuple[str, str]] = []
+        retrieval_presence_batch: list[tuple[str, str]] = []
+        retrieval_facet_value_batch: list[tuple[str, str, str]] = []
         with self.catalog_path.open(encoding="utf-8") as handle:
             for line in handle:
                 product = json.loads(line)
@@ -220,6 +239,10 @@ class Agent:
                     meta_row, value_rows = retrieval_index_rows(product)
                     retrieval_meta_batch.append(meta_row)
                     retrieval_value_batch.extend(value_rows)
+                    retrieval_presence_batch.extend(retrieval_presence_rows(product))
+                    retrieval_facet_value_batch.extend(
+                        retrieval_facet_value_rows(product)
+                    )
                 if len(batch) >= 1000:
                     cursor.executemany(
                         "INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -238,10 +261,20 @@ class Agent:
                             "INSERT OR IGNORE INTO retrieval_values VALUES (?, ?)",
                             retrieval_value_batch,
                         )
+                        cursor.executemany(
+                            "INSERT OR IGNORE INTO retrieval_facet_presence VALUES (?, ?)",
+                            retrieval_presence_batch,
+                        )
+                        cursor.executemany(
+                            "INSERT OR IGNORE INTO retrieval_facet_values VALUES (?, ?, ?)",
+                            retrieval_facet_value_batch,
+                        )
                     batch.clear()
                     question_batch.clear()
                     retrieval_meta_batch.clear()
                     retrieval_value_batch.clear()
+                    retrieval_presence_batch.clear()
+                    retrieval_facet_value_batch.clear()
         if batch:
             cursor.executemany(
                 "INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -259,6 +292,14 @@ class Agent:
                 cursor.executemany(
                     "INSERT OR IGNORE INTO retrieval_values VALUES (?, ?)",
                     retrieval_value_batch,
+                )
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO retrieval_facet_presence VALUES (?, ?)",
+                    retrieval_presence_batch,
+                )
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO retrieval_facet_values VALUES (?, ?, ?)",
+                    retrieval_facet_value_batch,
                 )
         self.connection.commit()
 
@@ -441,6 +482,9 @@ class Agent:
                         requested_k,
                         state.shown_ids,
                     )
+                legacy_candidate_ids = list(
+                    dict.fromkeys([*identifiers, *question_identifiers])
+                )[:100]
                 state.retrieval_decisions.append(
                     {
                         "turn": turn,
@@ -450,7 +494,14 @@ class Agent:
                             else "legacy_category_only"
                         ),
                         "enabled_route_families": ["ledger"],
-                        "candidate_union_count": len(identifiers),
+                        "candidate_union_count": len(legacy_candidate_ids),
+                        "candidate_ids": legacy_candidate_ids,
+                        "route_candidate_count": len(legacy_candidate_ids),
+                        "route_candidate_ids": legacy_candidate_ids,
+                        "eligible_candidate_count": len(legacy_candidate_ids),
+                        "eligible_candidate_ids": legacy_candidate_ids,
+                        "recommendation_count": len(identifiers),
+                        "recommendation_ids": list(identifiers),
                         "constraint_reranking": False,
                         "soft_relaxation": True,
                     }
@@ -478,7 +529,11 @@ class Agent:
                     ledger_ranking=shared_legacy_ranking,
                 )
                 identifiers = list(retrieval.recommendation_ids)
-                if self.explore_unseen and len(identifiers) == requested_k:
+                if self.explore_unseen and identifiers and (
+                    len(identifiers) == requested_k
+                    or self.retrieval_config.use_strict_front
+                    or not self.retrieval_config.use_soft_relaxation
+                ):
                     state.shown_ids.update(identifiers)
                 state.retrieval_decisions.append(retrieval.trace)
             recommendations = [

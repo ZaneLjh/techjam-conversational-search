@@ -25,7 +25,12 @@ class AblationVariant:
 def declared_variants() -> tuple[AblationVariant, ...]:
     """Return the fixed E4 ablation matrix in execution order."""
 
-    full = RetrievalConfig()
+    # Keep this historical E4 suite stable while E4.1 is evaluated separately.
+    # The explicit switches reproduce the original score-fused E4.
+    full = RetrievalConfig(
+        use_strict_front=False,
+        use_auxiliary_confidence_gate=False,
+    )
     return (
         AblationVariant("full", "All declared E4 retrieval components.", full),
         AblationVariant(

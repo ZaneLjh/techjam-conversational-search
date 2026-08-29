@@ -539,3 +539,86 @@ Verification evidence:
   seconds. If E3-shadow and E4-display histories have diverged, the safe fallback
   may scan the same FTS stream twice. The released replay contains no `AVOID`
   turn, so this synthetic tail is not represented by the public benchmark.
+
+## E4.1 - Compliance-gated fusion repair
+
+Base experiment: frozen full E4.
+
+E4.1 separates hard catalog compatibility from recall evidence. For each routed
+non-budget `MUST` constraint, a candidate is classified as exact, unknown, or
+mismatched. Exact candidates may enter the strict tier; missing facet metadata
+is neutral and remains eligible for recovery; an observable non-match is a
+mismatch. Price remains a soft ranking signal and never becomes a hard filter.
+
+The declared relaxed configuration places strict candidates first, reserves one
+lower Top-10 recovery position on the first page and up to two after a miss, and
+broadens relaxation only when the strict tier cannot fill the page. Auxiliary
+current-turn, ledger, and category fusion is scaled by exact non-budget evidence
+coverage. Every returned candidate pool is deterministic, unique, capped at
+100, and begins with the displayed recommendations.
+
+The complete strict-front/backfill policy preserves all hits and improves the
+aggregate score slightly, but does not meet the frozen promotion gate:
+
+| Variant | HR@10 | MRR | MTTC | TechnicalScore | Delta vs E4 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Frozen E4 fallback | 1.000000 | 0.798198 | 2.410000 | 0.911259 | 0.000000 |
+| Complete E4.1 | 1.000000 | 0.807163 | 2.420000 | 0.913749 | +0.002490 |
+| Strict-only diagnostic | 1.000000 | 0.798218 | 2.410000 | 0.911265 | +0.000006 |
+
+The complete-policy paired result contains 8 improved, 7 regressed, and 185 tied
+sessions, with zero hit-to-miss transitions. Three of five deterministic public
+consistency slices have positive TechnicalScore delta (`+0.006167`,
+`-0.005071`, `-0.001041`, `+0.006455`, `+0.005937`). Boundary mean utility
+changes by `-0.022048`. These public slices are diagnostic only.
+
+The strict-only row is deliberately non-promotable: it excludes UNKNOWN
+candidates from display whenever strict candidates exist. Its route-level
+candidate pool is still preserved for funnel diagnostics and the later E4.5
+projection seam. It must not be described as the full UNKNOWN-neutral E4.1
+policy.
+
+Production safety is explicit: the no-argument `Agent` constructor uses
+`e4_fallback_config()`. `e4_1_candidate_config()` and the
+`--e4-1-candidate` runner flag are experiment-only. `--disable-e4-1` reproduces
+the frozen E4 ranking while retaining the new audit tables and traces.
+
+Reproduction:
+
+```bash
+python -m tools.evaluate_variant --e4-1-candidate \
+  --output results/e4_1_strict_front.json
+python -m tools.evaluate_variant --e4-1-candidate \
+  --output results/e4_1_strict_front_repeat.json
+cmp results/e4_1_strict_front.json \
+  results/e4_1_strict_front_repeat.json
+python -m tools.evaluate_variant --e4-1-strict-only-diagnostic \
+  --output results/e4_1_strict_only_diagnostic.json
+python -m tools.evaluate_variant --disable-e4-1 \
+  --output results/e4_1a_e4_fallback.json
+python -m tools.e4_1_compliance_suite \
+  --output results/e4_1_compliance_suite.json
+python -m tools.e4_1_ablation_suite \
+  --output results/e4_1_ablation_suite.json
+python -m tools.e4_1_funnel_report \
+  --output results/e4_1_candidate_funnel.json
+python -m tools.fold_report \
+  --baseline results/e4_multi_route_reranking.json \
+  --candidate results/e4_1_strict_front.json --folds 5 \
+  --output results/e4_1_vs_e4_public_folds.json
+python -m tools.promotion_gate \
+  --baseline results/e4_multi_route_reranking.json \
+  --candidate results/e4_1_strict_front.json \
+  --candidate-repeat results/e4_1_strict_front_repeat.json \
+  --fold-report results/e4_1_vs_e4_public_folds.json \
+  --compliance-report results/e4_1_compliance_suite.json \
+  --fallback-result results/e4_1a_e4_fallback.json \
+  --output results/e4_1_promotion_gate.json
+```
+
+Promotion requires TechnicalScore delta at least `+0.005`, non-decreasing Hit
+Rate, deterministic repeat output, byte-compatible fallback, all compliance
+checks, and positive TechnicalScore delta on at least four of five true
+target-product-disjoint folds. Complete E4.1 currently fails the score-delta and
+public-slice gates, so the promotion decision is **reject** before held-out
+validation is even considered. Frozen E4 remains the deployment configuration.
