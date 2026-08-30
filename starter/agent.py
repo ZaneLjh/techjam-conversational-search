@@ -22,6 +22,10 @@ from starter.question_policy import (
     QuestionPolicyConfig,
     extract_question_facets,
 )
+from starter.reranking import (
+    RerankingConfig,
+    SemanticConstraintReranker,
+)
 from starter.projection import (
     ProjectionConfig,
     ProjectionIndex,
@@ -101,6 +105,7 @@ class SessionState:
     projection_template_confident: bool = True
     projection_decisions: list[dict] = field(default_factory=list)
     projection_question_decisions: list[dict] = field(default_factory=list)
+    reranking_decisions: list[dict] = field(default_factory=list)
     projection_disclosed_values: set[str] = field(default_factory=set)
     projection_pending_exact_values: tuple[ParsedConstraint, ...] = ()
     projection_override_pending: bool = False
@@ -257,6 +262,7 @@ class Agent:
         retrieval_config: RetrievalConfig | None = None,
         question_policy_config: QuestionPolicyConfig | None = None,
         projection_config: ProjectionConfig | None = None,
+        reranking_config: RerankingConfig | None = None,
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.explore_unseen = explore_unseen
@@ -265,6 +271,7 @@ class Agent:
         # default; experiment tools pass the E4.1 candidate explicitly.
         self.retrieval_config = retrieval_config or e4_fallback_config()
         self.projection_config = projection_config or ProjectionConfig()
+        self.reranking_config = reranking_config or RerankingConfig()
         self.question_policy_config = question_policy_config or QuestionPolicyConfig(
             repeat_other_until_exhausted=self.projection_config.enabled,
         )
@@ -276,6 +283,10 @@ class Agent:
         self._build_index()
         self.retriever = MultiRouteRetriever(self.connection, self.retrieval_config)
         self.projection_index = ProjectionIndex(self.catalog_path, self.projection_config)
+        self.reranker = SemanticConstraintReranker(
+            self.connection,
+            self.reranking_config,
+        )
 
     @staticmethod
     def _exact_projection_constraints(
@@ -861,6 +872,39 @@ class Agent:
                 predecessor_candidate_ids,
                 "runtime_error",
             )
+
+        # E5 retains full-catalog uniqueness as the confidence test, but it
+        # permits the unique projection to enter the display only when frozen
+        # E4 already retrieved that product in its bounded Top-100 evidence
+        # window.  This prevents the sidecar from becoming a target-injection
+        # channel while preserving E4.5 itself as an independently runnable
+        # historical experiment when E5 is disabled.
+        if (
+            self.reranking_config.enforce_projection_candidate_membership
+            and projection_ranking.active
+            and projection_ranking.trace.get("ranking_applied") is True
+            and len(projection_ranking.posterior_ids) == 1
+            and projection_ranking.posterior_ids[0]
+            not in set(predecessor_candidate_ids)
+        ):
+            projection_ranking = self.projection_index._fallback(
+                predecessor_identifiers,
+                predecessor_candidate_ids,
+                "unique_outside_predecessor_pool",
+            )
+            projection_ranking.trace.update(
+                {
+                    "e5_admission_required": True,
+                    "e5_admission_passed": False,
+                }
+            )
+        elif self.reranking_config.enforce_projection_candidate_membership:
+            projection_ranking.trace.update(
+                {
+                    "e5_admission_required": True,
+                    "e5_admission_passed": True,
+                }
+            )
         state.projection_decisions.append(dict(projection_ranking.trace))
 
         if projection_ranking.active:
@@ -932,6 +976,47 @@ class Agent:
             state.projection_decisions[-1] = dict(projection_ranking.trace)
 
         state.projection_question_decisions.append(dict(rollout_trace))
+
+        locked_projection_ids: tuple[str, ...] = ()
+        if (
+            projection_ranking.active
+            and projection_ranking.trace.get("ranking_applied") is True
+            and len(projection_ranking.posterior_ids) == 1
+        ):
+            locked_projection_ids = tuple(projection_ranking.posterior_ids)
+        try:
+            reranking = self.reranker.rerank(
+                identifiers,
+                predecessor_candidate_ids,
+                (
+                    state.projection_ledger.entries
+                    if state.projection_template_confident
+                    else state.ledger.entries
+                ),
+                locked_ids=locked_projection_ids,
+                requested_k=requested_k,
+                turn=turn,
+                avoid_values=state.avoid_values(),
+            )
+            identifiers = list(reranking.recommendation_ids)
+            state.reranking_decisions.append(dict(reranking.trace))
+        except Exception as exc:
+            # Semantic reranking is a post-projection, membership-preserving
+            # transaction. Any runtime error therefore exposes the safe
+            # post-projection order without rolling back the projection itself.
+            state.reranking_decisions.append(
+                {
+                    "turn": turn,
+                    "enabled": self.reranking_config.enabled,
+                    "applied": False,
+                    "reason": f"runtime_error:{type(exc).__name__}",
+                    "before_ids": list(identifiers),
+                    "after_ids": list(identifiers),
+                    "locked_ids": list(locked_projection_ids),
+                    "membership_invariant": True,
+                    "use_quality_tiebreak": self.reranking_config.use_quality_tiebreak,
+                }
+            )
         ask_attribute = decision.ask_attribute
         message = decision.message
         if ask_attribute is not None:
@@ -965,6 +1050,7 @@ class Agent:
             "projection_enabled": self.projection_config.enabled,
             "projection_ready": self.projection_index.ready,
             "projection_status_reason": self.projection_index.status_reason,
+            "semantic_reranking_enabled": self.reranking_config.enabled,
             "projection_template_confident": state.projection_template_confident,
             "question_candidate_ranking": "e3_frozen",
             "last_asked_attribute": state.last_asked_attribute,
@@ -978,6 +1064,7 @@ class Agent:
             "projection_question_decisions": list(
                 state.projection_question_decisions
             ),
+            "reranking_decisions": list(state.reranking_decisions),
             "projection_constraints": state.projection_ledger.evidence_trace(),
             "constraints": state.ledger.evidence_trace(),
         }

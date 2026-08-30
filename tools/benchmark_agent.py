@@ -11,6 +11,8 @@ from pathlib import Path
 from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 from starter.agent import Agent
 from starter.projection import ProjectionConfig
+from starter.question_policy import QuestionPolicyConfig
+from starter.reranking import RerankingConfig
 from starter.retrieval import (
     RetrievalConfig,
     e4_1_candidate_config,
@@ -35,12 +37,16 @@ class TimedAgent:
         catalog_path: str | Path,
         retrieval_config: RetrievalConfig | None = None,
         projection_config: ProjectionConfig | None = None,
+        question_policy_config: QuestionPolicyConfig | None = None,
+        reranking_config: RerankingConfig | None = None,
     ) -> None:
         started = time.perf_counter()
         self.agent = Agent(
             catalog_path,
             retrieval_config=retrieval_config,
             projection_config=projection_config,
+            question_policy_config=question_policy_config,
+            reranking_config=reranking_config,
         )
         self.startup_seconds = time.perf_counter() - started
         self.response_seconds: list[float] = []
@@ -90,6 +96,16 @@ def main() -> None:
         help="Benchmark the E4.5 master-kill-switch fallback.",
     )
     parser.add_argument(
+        "--e5-candidate",
+        action="store_true",
+        help="Benchmark guarded E5 with quality and question rollout disabled.",
+    )
+    parser.add_argument(
+        "--disable-e5",
+        action="store_true",
+        help="Benchmark E5's frozen-E4 master fallback.",
+    )
+    parser.add_argument(
         "--projection-sidecar",
         default="results/e4_5_intent_projection.jsonl.gz",
     )
@@ -99,20 +115,32 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.e4_5_candidate and args.e5_candidate:
+        parser.error("--e4-5-candidate and --e5-candidate are mutually exclusive")
+
     samples = load_jsonl(args.dataset)
     catalog_ids, categories, products = catalog_index(args.catalog)
     selected = (
         e4_1_candidate_config()
-        if args.e4_1_candidate and not args.e4_5_candidate
+        if args.e4_1_candidate and not args.e4_5_candidate and not args.e5_candidate
         else e4_fallback_config()
     )
+    e5_enabled = args.e5_candidate and not args.disable_e5
+    e45_enabled = args.e4_5_candidate and not args.disable_e4_5
     agent = TimedAgent(
         args.catalog,
         replace(selected, enabled=not args.disable_multi_route_ranking),
         ProjectionConfig(
-            enabled=args.e4_5_candidate and not args.disable_e4_5,
+            enabled=e45_enabled or e5_enabled,
             sidecar_path=args.projection_sidecar,
             manifest_path=args.projection_manifest,
+            use_question_rollout=e45_enabled,
+        ),
+        QuestionPolicyConfig(repeat_other_until_exhausted=e45_enabled),
+        RerankingConfig(
+            enabled=e5_enabled,
+            enforce_projection_candidate_membership=e5_enabled,
+            use_quality_tiebreak=False,
         ),
     )
     evaluation_started = time.perf_counter()

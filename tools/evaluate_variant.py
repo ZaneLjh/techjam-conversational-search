@@ -7,6 +7,8 @@ from pathlib import Path
 from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 from starter.agent import Agent
 from starter.projection import ProjectionConfig
+from starter.question_policy import QuestionPolicyConfig
+from starter.reranking import RerankingConfig
 from starter.retrieval import (
     RetrievalConfig,
     e4_1_candidate_config,
@@ -17,7 +19,7 @@ from starter.retrieval import (
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run a declared E2/E4 variant through the public harness."
+        description="Run a declared E2/E4/E5 variant through the public harness."
     )
     parser.add_argument("--catalog", default="data/catalog.jsonl")
     parser.add_argument("--dataset", default="data/public_set.jsonl")
@@ -99,6 +101,31 @@ def main() -> None:
     parser.add_argument("--disable-projection-reranking", action="store_true")
     parser.add_argument("--disable-projection-rollout", action="store_true")
     parser.add_argument(
+        "--e5-candidate",
+        action="store_true",
+        help=(
+            "Run guarded E5 on frozen E4: unique Top-100 projection rescue, "
+            "then display-only semantic reranking with quality disabled."
+        ),
+    )
+    parser.add_argument(
+        "--disable-e5",
+        action="store_true",
+        help="Master E5 kill switch; reproduce frozen E4 without sidecar loading.",
+    )
+    parser.add_argument("--disable-e5-projection", action="store_true")
+    parser.add_argument("--disable-e5-semantic", action="store_true")
+    parser.add_argument(
+        "--enable-e5-quality",
+        action="store_true",
+        help="Diagnostic only: enable the catalog rating quality tiebreak.",
+    )
+    parser.add_argument(
+        "--enable-e5-projection-rollout",
+        action="store_true",
+        help="Diagnostic only: enable E4.5 question rollout inside E5.",
+    )
+    parser.add_argument(
         "--projection-max-rerank-posterior",
         "--projection-max-posterior",
         dest="projection_max_rerank_posterior",
@@ -127,6 +154,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.e4_5_candidate and args.e5_candidate:
+        parser.error("--e4-5-candidate and --e5-candidate are mutually exclusive")
+
     samples = load_jsonl(args.dataset)
     catalog_ids, categories, products = catalog_index(args.catalog)
     selected = (
@@ -135,6 +165,8 @@ def main() -> None:
             args.e4_fallback_ranking
             or args.e4_5_candidate
             or args.disable_e4_5
+            or args.e5_candidate
+            or args.disable_e5
         )
         else e4_1_strict_only_config()
         if args.e4_1_strict_only_diagnostic
@@ -161,19 +193,39 @@ def main() -> None:
         ),
         relaxed_backfill_slots=args.relaxed_backfill_slots,
     )
+    e5_enabled = args.e5_candidate and not args.disable_e5
+    e45_enabled = args.e4_5_candidate and not args.disable_e4_5
+    projection_enabled = e45_enabled or (
+        e5_enabled and not args.disable_e5_projection
+    )
+    projection_rollout_enabled = (
+        e45_enabled and not args.disable_projection_rollout
+    ) or (
+        e5_enabled
+        and args.enable_e5_projection_rollout
+        and not args.disable_projection_rollout
+    )
     agent = Agent(
         args.catalog,
         explore_unseen=not args.disable_candidate_exploration,
         retrieval_config=retrieval_config,
+        question_policy_config=QuestionPolicyConfig(
+            repeat_other_until_exhausted=projection_rollout_enabled,
+        ),
         projection_config=ProjectionConfig(
-            enabled=args.e4_5_candidate and not args.disable_e4_5,
+            enabled=projection_enabled,
             sidecar_path=args.projection_sidecar,
             manifest_path=args.projection_manifest,
             use_reranking=not args.disable_projection_reranking,
-            use_question_rollout=not args.disable_projection_rollout,
+            use_question_rollout=projection_rollout_enabled,
             max_rerank_posterior_size=args.projection_max_rerank_posterior,
             max_posterior_size=args.projection_max_rollout_posterior,
             min_question_gain=args.projection_min_question_gain,
+        ),
+        reranking_config=RerankingConfig(
+            enabled=e5_enabled and not args.disable_e5_semantic,
+            enforce_projection_candidate_membership=e5_enabled,
+            use_quality_tiebreak=args.enable_e5_quality,
         ),
     )
     result = evaluate(agent, samples, catalog_ids, categories, products)

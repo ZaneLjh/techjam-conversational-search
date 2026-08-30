@@ -741,3 +741,66 @@ Build and evaluate against the same `data/catalog.jsonl` path and bytes. A
 manifest built from `catalog.jsonl.gz` is intentionally not interchangeable
 with the plain JSONL evaluator input. The generated sidecar should not be
 committed; preserve its manifest and repeatability hashes as evidence.
+
+## E5 - Guarded projection and semantic reranking
+
+E5 starts from the rejected-but-useful E4.5 evidence without promoting E4.5 as
+the default. `Agent()` still returns frozen E4 unless E5 is explicitly enabled.
+The predeclared E5 candidate composes two bounded operations:
+
+1. E4.5 may rescue a globally unique exact projection only when that product
+   already occurs in frozen E4's Top-100 candidate window. The rescued product
+   is locked at the front of the displayed set.
+2. Catalog-only semantic alignment reorders the remaining displayed products.
+   Ranks 11-100 provide local IDF evidence but cannot enter. Confirmed MUST
+   mismatches sort below compatible or UNKNOWN products. Rating quality and
+   projection question rollout are disabled in the candidate and retained only
+   as diagnostics.
+
+An active AVOID constraint bypasses semantic reranking. Missing metadata or a
+semantic runtime failure retains the safe post-projection order. The E5 master
+kill switch disables both projection and semantic components and does not load
+the projection artifact.
+
+The five released-data slices remain public consistency diagnostics. E5 adds a
+separate deterministic generator for target-group-disjoint evidence. Its full
+profile creates 3 seeds x 5 folds x 200 sessions = 3,000 sessions, with exactly
+80 Buying, 80 Browsing, 30 Intent Override, and 10 Boundary sessions in every
+seed/fold cell. Exact evaluator templates generate the hidden cards and replies;
+the production Agent receives only its ordinary profile and conversation API.
+Public target groups are quarantined, equivalent/near-duplicate groups own one
+fold, selected groups are not reused across seeds, and every artifact is bound
+by SHA-256.
+
+Reproduction:
+
+```bash
+python -m tools.e5_synthetic_corpus \
+  --catalog data/catalog.jsonl \
+  --public-dataset data/public_set.jsonl \
+  --output-dir results/e5_synthetic \
+  --folds 5 --seeds 1701 1702 1703 --sessions-per-fold 200
+
+python -m tools.e5_synthetic_suite \
+  --catalog data/catalog.jsonl \
+  --dataset results/e5_synthetic/e5_synthetic_sessions.jsonl \
+  --dataset-manifest results/e5_synthetic/e5_synthetic_manifest.json \
+  --sidecar results/e4_5_intent_projection.jsonl.gz \
+  --manifest results/e4_5_projection_manifest.json \
+  --profile promotion \
+  --output results/e5_synthetic_promotion.json
+```
+
+Run the promotion profile twice and require byte-identical reports. A
+deterministic candidate must achieve TechnicalScore delta at least `+0.005`,
+non-decreasing Hit Rate@10, zero hit-to-miss transitions, positive delta in at
+least four of five group-disjoint folds, non-negative aggregate delta for all
+three seeds, and no Boundary or Intent Override hit-rate loss. Promotion
+eligibility additionally requires the complete 3,000-session corpus; a
+20-session-per-cell smoke run is always labeled non-promotion evidence even if
+its metric checks pass. Retrieval-funnel fields in this suite are observed only
+until each variant's first display hit, so they are labeled hit-censored, are
+not compared between variants, and do not participate in the gate. An unbiased
+funnel comparison requires a separate fixed-dialogue, all-turn replay.
+Synthetic evidence is a stronger development check than public slicing, but it
+remains a simulator-derived estimate rather than hidden-test evidence.
