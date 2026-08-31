@@ -491,6 +491,14 @@ def _sha256_file(path: Path, *, max_bytes: int | None = None) -> str:
     return digest.hexdigest()
 
 
+def canonical_source_sha256(path: str | Path) -> str:
+    """Hash UTF-8 source after normalizing platform line endings to LF."""
+
+    text = Path(path).read_bytes().decode("utf-8")
+    canonical = text.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _read_bounded_file(path: Path, *, max_bytes: int) -> bytes:
     with path.open("rb") as handle:
         value = handle.read(max_bytes + 1)
@@ -969,7 +977,9 @@ class ProjectionIndex:
         )
         if checksums.get("sidecar_gzip_sha256") != actual_sidecar_sha256:
             raise ValueError("sidecar checksum mismatch")
-        if checksums.get("transform_source_sha256") != _sha256_file(Path(__file__)):
+        if checksums.get("transform_source_sha256") != canonical_source_sha256(
+            Path(__file__)
+        ):
             raise ValueError("projection transform checksum mismatch")
         catalog_content_sha256, catalog_content_bytes = _content_digest(
             catalog_path,

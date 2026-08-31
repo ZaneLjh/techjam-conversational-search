@@ -26,6 +26,7 @@ from starter.projection import (
     PROJECTION_SCHEMA_VERSION,
     PROJECTION_VERSION,
     canonical_projection_line,
+    canonical_source_sha256,
     classify_constraint,
     coarse_category,
     normalize_projection_value,
@@ -392,7 +393,7 @@ def build_projection_suite(
                 "catalog_content_sha256": catalog_content_digest.hexdigest(),
                 "sidecar_jsonl_sha256": sidecar_jsonl_digest.hexdigest(),
                 "sidecar_gzip_sha256": sidecar_gzip_sha256,
-                "transform_source_sha256": _sha256_file(
+                "transform_source_sha256": canonical_source_sha256(
                     Path(projection_module.__file__)
                 ),
             },

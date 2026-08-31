@@ -739,14 +739,16 @@ python -m tools.e4_5_funnel_report \
 
 Build and evaluate against the same `data/catalog.jsonl` path and bytes. A
 manifest built from `catalog.jsonl.gz` is intentionally not interchangeable
-with the plain JSONL evaluator input. The generated sidecar should not be
-committed; preserve its manifest and repeatability hashes as evidence.
+with the plain JSONL evaluator input. Preserve the experiment copy and its
+repeatability hashes as evidence. The promoted, catalog-bound runtime copy is
+packaged under `starter/assets/`.
 
 ## E5 - Guarded projection and semantic reranking
 
-E5 starts from the rejected-but-useful E4.5 evidence without promoting E4.5 as
-the default. `Agent()` still returns frozen E4 unless E5 is explicitly enabled.
-The predeclared E5 candidate composes two bounded operations:
+E5 starts from the rejected-but-useful E4.5 evidence without promoting E4.5
+itself. After the full synthetic gate and locked public audit passed, the
+guarded hybrid became the default no-config `Agent()` path. It composes two
+bounded operations:
 
 1. E4.5 may rescue a globally unique exact projection only when that product
    already occurs in frozen E4's Top-100 candidate window. The rescued product
@@ -760,7 +762,26 @@ The predeclared E5 candidate composes two bounded operations:
 An active AVOID constraint bypasses semantic reranking. Missing metadata or a
 semantic runtime failure retains the safe post-projection order. The E5 master
 kill switch disables both projection and semantic components and does not load
-the projection artifact.
+the projection artifact. If the packaged artifact fails strict validation, the
+default path atomically disables both E5 components and returns exact frozen E4;
+the unvalidated semantic-only ablation is never selected implicitly.
+
+Promotion evidence:
+
+- full synthetic TechnicalScore: `0.886730 -> 0.908304` (`+0.021573`);
+- Hit Rate@10: `0.992333 -> 0.996000`, with 11 miss-to-hit and zero
+  hit-to-miss transitions;
+- all five group-disjoint folds and all three seeds improved;
+- locked public TechnicalScore: `0.911259 -> 0.918747` (`+0.007488`),
+  with ten improved sessions and zero regressions;
+- repeated reports were byte-identical and all promotion checks passed.
+
+The promoted runtime keeps rating quality and projection question rollout off.
+The bundled projection sidecar is catalog-derived, contains no evaluation
+labels, and is strictly bound to the released catalog and transform hashes.
+The transform-source digest canonicalizes CRLF and CR source line endings to
+LF before hashing, so identical Git source remains valid on Windows without
+weakening catalog, sidecar, or manifest byte validation.
 
 The five released-data slices remain public consistency diagnostics. E5 adds a
 separate deterministic generator for target-group-disjoint evidence. Its full

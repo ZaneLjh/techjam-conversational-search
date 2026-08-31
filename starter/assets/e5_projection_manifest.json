@@ -1,0 +1,313 @@
+{
+  "catalog": {
+    "content_bytes": 60546327,
+    "input_bytes": 60546327,
+    "input_format": "jsonl",
+    "row_count": 50000,
+    "unique_parent_asin_count": 50000
+  },
+  "checksums": {
+    "catalog_content_sha256": "da979b05a68af864cb0dcf9ee6a81c010c7e66a57978ad286c7a2e005fc69a67",
+    "catalog_input_sha256": "da979b05a68af864cb0dcf9ee6a81c010c7e66a57978ad286c7a2e005fc69a67",
+    "sidecar_gzip_sha256": "dadffeabfe10e1a4c0dc3f727f0837c7de7015b9b0701c365525df95476edc2a",
+    "sidecar_jsonl_sha256": "21eedd571ced8e4a0f0930e56878502cff793267ce1f8c558dc812d08e916f43",
+    "transform_source_sha256": "aaf337edd3c544c52f98773f14c8ef8b3dbbab2ae3985b642b637e21e2b6269a"
+  },
+  "collisions": {
+    "categories": {
+      "distinct_fingerprint_count": 1114,
+      "largest_collision_sets": [
+        {
+          "document_frequency": 1354,
+          "domain": "category",
+          "fingerprint": "81a139fd3ff8915797685c2e5e4c060a56c4522845c6a2882bccd6040f606eb0",
+          "normalized_value": "shirts t shirts"
+        },
+        {
+          "document_frequency": 1136,
+          "domain": "category",
+          "fingerprint": "5e53d86196612385188ed29b66037966082f34dcadfd66d394a890bea1749219",
+          "normalized_value": "shoes jewelry westlake"
+        },
+        {
+          "document_frequency": 1034,
+          "domain": "category",
+          "fingerprint": "eab5bc14ec24527481d909bda8eeb6eb0026998127f8cb2c3c927e1a30b8b338",
+          "normalized_value": "watches wrist watches"
+        },
+        {
+          "document_frequency": 1017,
+          "domain": "category",
+          "fingerprint": "37c56a04c823f3a10bdab08e5639acf8415865c8157b0eee2b4a1362d6049ed4",
+          "normalized_value": "shoes fashion sneakers"
+        },
+        {
+          "document_frequency": 769,
+          "domain": "category",
+          "fingerprint": "e9d0cc1ac7aeaf0f700b09e318c44cae564616c07520833f9342ab2b71ca0d16",
+          "normalized_value": "dresses casual"
+        },
+        {
+          "document_frequency": 765,
+          "domain": "category",
+          "fingerprint": "5d33ebce3d403ae730bc15e2ca27e628f69c358b404428a71a8363c289a383fb",
+          "normalized_value": "women shoes"
+        },
+        {
+          "document_frequency": 681,
+          "domain": "category",
+          "fingerprint": "f334f421bb95f5143aeb76afd62bad17d0bb48f97d3a817b47113ce159205d21",
+          "normalized_value": "tees blouses blouses button down shirts"
+        },
+        {
+          "document_frequency": 680,
+          "domain": "category",
+          "fingerprint": "89649ac87b6f3cb8244b7fbfae9328ecc6806f1a253ea227784b9352a6b91057",
+          "normalized_value": "tees blouses t shirts"
+        },
+        {
+          "document_frequency": 665,
+          "domain": "category",
+          "fingerprint": "ff2cf22669a212ed2c9ab2920dd4b3a520cf71e6933149960b7376cdabc5d7cf",
+          "normalized_value": "shoes loafers slip ons"
+        },
+        {
+          "document_frequency": 649,
+          "domain": "category",
+          "fingerprint": "f483dca579704a62c8250b0b66c1c62331211bbfdaace79a98b548bae778da8d",
+          "normalized_value": "tops tees t shirts"
+        },
+        {
+          "document_frequency": 630,
+          "domain": "category",
+          "fingerprint": "1efdfc4f08b023d1f9a48c2eda7cdff0e1d96d646485ff119056e8a92366a6dd",
+          "normalized_value": "shoes pumps"
+        },
+        {
+          "document_frequency": 605,
+          "domain": "category",
+          "fingerprint": "246b52b1f6553d1a9f61cc7185857dfca1c781b3e4f88f200a97c59dec0c581d",
+          "normalized_value": "shoes flats"
+        },
+        {
+          "document_frequency": 591,
+          "domain": "category",
+          "fingerprint": "b14f428e9769553ab886501f7638428882f31da5800bafe03669cd15c70dce0f",
+          "normalized_value": "women dresses"
+        },
+        {
+          "document_frequency": 586,
+          "domain": "category",
+          "fingerprint": "6464242b0b38c6d9d289038b7fc80292f854e7d3304aab5dd99014c1c0cd6387",
+          "normalized_value": "shoes sandals"
+        },
+        {
+          "document_frequency": 545,
+          "domain": "category",
+          "fingerprint": "d15ac733bbce6665ad7aca643d172222b1015c30152b0b86b74b07498f076955",
+          "normalized_value": "sandals platforms wedges"
+        },
+        {
+          "document_frequency": 538,
+          "domain": "category",
+          "fingerprint": "7ad813b6c8c5938c6fbcd1f58b10f4feae4e4f824210a7f1075f4df8eea145e9",
+          "normalized_value": "shoes slippers"
+        },
+        {
+          "document_frequency": 531,
+          "domain": "category",
+          "fingerprint": "b6d118d8512d3dbff2f4b4b5e951c41b0837227eea719abb0ee3dc55eb4d56dc",
+          "normalized_value": "necklaces pendant necklaces"
+        },
+        {
+          "document_frequency": 522,
+          "domain": "category",
+          "fingerprint": "562d400cd03067f3ca8f020702343f8054bbf398c64c2fe70c0360a061d3dc33",
+          "normalized_value": "running road running"
+        },
+        {
+          "document_frequency": 522,
+          "domain": "category",
+          "fingerprint": "55e1fcf26b6162eb1b4aba81e529c10e7890c20f3e5e8989552828d34fc62bd1",
+          "normalized_value": "sunglasses eyewear accessories sunglasses"
+        },
+        {
+          "document_frequency": 519,
+          "domain": "category",
+          "fingerprint": "0cfc5fc59254b156d0bbd1765cb1f1099c1176314279363c4cbc9b2f4144bc43",
+          "normalized_value": "tees blouses tunics"
+        }
+      ],
+      "maximum_document_frequency": 1354,
+      "median_document_frequency": 8.0,
+      "p90_document_frequency": 109,
+      "p95_document_frequency": 232,
+      "p99_document_frequency": 605,
+      "singleton_fingerprint_count": 234
+    },
+    "constraint_occurrences": 197857,
+    "constraints": {
+      "distinct_fingerprint_count": 58821,
+      "largest_collision_sets": [
+        {
+          "document_frequency": 13644,
+          "domain": "constraint:feature",
+          "fingerprint": "b896dec9fa75bd34b6708cd477ed73a66be1ad5c48d949ef392d46de26c87bc0",
+          "normalized_value": "imported"
+        },
+        {
+          "document_frequency": 8147,
+          "domain": "constraint:material",
+          "fingerprint": "6bcc2d261b73fd876115040bf5a1923cfcce60884492c9a220d886a8e33db8e0",
+          "normalized_value": "cotton"
+        },
+        {
+          "document_frequency": 7159,
+          "domain": "constraint:material",
+          "fingerprint": "c4927df251b667ad9b6e3aee26be7a936da32be1b60f3228a7b857ac462246e0",
+          "normalized_value": "polyester"
+        },
+        {
+          "document_frequency": 7017,
+          "domain": "constraint:material",
+          "fingerprint": "64fa6de27bb51cfa0a892d17f1da79c1c3bab1c903531a34c91d4fb3a1c48be6",
+          "normalized_value": "leather"
+        },
+        {
+          "document_frequency": 6905,
+          "domain": "constraint:color",
+          "fingerprint": "77c029a1d33faa6e54d7170e49073b6ea42bb0be96affd61a33835b2b7d1be9b",
+          "normalized_value": "color black"
+        },
+        {
+          "document_frequency": 6264,
+          "domain": "constraint:feature",
+          "fingerprint": "8e3e54cdb99dfbd7f23de0eb4c3e7053601ff67d825ded61d16a663c0cada064",
+          "normalized_value": "pull on closure"
+        },
+        {
+          "document_frequency": 5414,
+          "domain": "constraint:feature",
+          "fingerprint": "442be6f6e2e0dfc570f3fe58d56f4e910abf7f66633d8ab624b8cc61d2dcff41",
+          "normalized_value": "rubber sole"
+        },
+        {
+          "document_frequency": 4071,
+          "domain": "constraint:feature",
+          "fingerprint": "105fe59c822efff44d95e78bca503878040f2d75c0e8d14318bc98853e3e4585",
+          "normalized_value": "machine wash"
+        },
+        {
+          "document_frequency": 4016,
+          "domain": "constraint:feature",
+          "fingerprint": "cfc01801498c1d134ac54fd37e8eeaac4cc913d3193dc46f3e85ef7b3726f5b6",
+          "normalized_value": "is discontinued by manufacturer no"
+        },
+        {
+          "document_frequency": 3208,
+          "domain": "constraint:feature",
+          "fingerprint": "c0efb318dc4644d52603c469ca7d883b332de7869cb65fd390b4818650dc61d5",
+          "normalized_value": "hand wash only"
+        },
+        {
+          "document_frequency": 2837,
+          "domain": "constraint:material",
+          "fingerprint": "bcfcf315844a8aaf6bb7694a9f8970c05dcec72e17ba85455b3ac3e8d7866904",
+          "normalized_value": "100 cotton"
+        },
+        {
+          "document_frequency": 2760,
+          "domain": "constraint:style",
+          "fingerprint": "79d80e4e0ba99fe37400b9601033bab84a239cb3085ac9b221cc88beb3a19eca",
+          "normalized_value": "department womens"
+        },
+        {
+          "document_frequency": 2578,
+          "domain": "constraint:color",
+          "fingerprint": "9b73d22e361aa28aed58ad4ce2102b9cb84e6dc7f0d4dda16f2bc2fb941f699c",
+          "normalized_value": "color white"
+        },
+        {
+          "document_frequency": 2574,
+          "domain": "constraint:material",
+          "fingerprint": "1d7643c97bb34b54972498a92aa054325f71941d5ed55877032509116a16dfa7",
+          "normalized_value": "fabric"
+        },
+        {
+          "document_frequency": 2489,
+          "domain": "constraint:material",
+          "fingerprint": "820e23317abae67e11068cdb2764ac2668576b346eee9e8425a6c822e8feaa96",
+          "normalized_value": "100 leather"
+        },
+        {
+          "document_frequency": 2415,
+          "domain": "constraint:material",
+          "fingerprint": "fde11a15e0fd51af085f44143903f932b57943f01e1ac3e05fbe1a222a88ed44",
+          "normalized_value": "100 polyester"
+        },
+        {
+          "document_frequency": 2202,
+          "domain": "constraint:color",
+          "fingerprint": "ee4d4c3ae4ed965acdbc14e0a7ad1242992e7eb1631d83a68ca20c6b245f6efb",
+          "normalized_value": "color blue"
+        },
+        {
+          "document_frequency": 2137,
+          "domain": "constraint:feature",
+          "fingerprint": "3abcec096b19431a58ba1bd721e93b6dbd3b859328937d055cafd91b20a6b6e9",
+          "normalized_value": "zipper closure"
+        },
+        {
+          "document_frequency": 1954,
+          "domain": "constraint:feature",
+          "fingerprint": "32e818f73965d34bc44dc61cd0c88866607592741fa86f2cc18e6600386a64d9",
+          "normalized_value": "button closure"
+        },
+        {
+          "document_frequency": 1645,
+          "domain": "constraint:material",
+          "fingerprint": "a2ea5f34f0b27503e345eda8f8130b3f817bd40fc07367fc61888c184f3b897a",
+          "normalized_value": "nylon"
+        }
+      ],
+      "maximum_document_frequency": 13644,
+      "median_document_frequency": 1,
+      "p90_document_frequency": 1,
+      "p95_document_frequency": 2,
+      "p99_document_frequency": 9,
+      "singleton_fingerprint_count": 53673
+    },
+    "true_sha256_collision_count": 0
+  },
+  "experiment": "E4.5 catalog-derived intent-card projection",
+  "parity": {
+    "classifier_checks": 197857,
+    "classifier_mismatches": 0,
+    "coarse_category_mismatches": 0,
+    "intent_card_mismatches": 0,
+    "mismatch_examples": {
+      "classifier": [],
+      "coarse_category": [],
+      "intent_card": [],
+      "rollout": []
+    },
+    "rollout_checks": 600000,
+    "rollout_mismatches": 0,
+    "status": "pass"
+  },
+  "passed": true,
+  "projection": {
+    "algorithm_version": "e4.5-intent-card-v1",
+    "canonical_json": "UTF-8 JSON Lines; keys sorted; compact separators; LF endings; catalog row order",
+    "record_schema_version": 1
+  },
+  "schema_version": 1,
+  "sidecar": {
+    "compressed_bytes": 15104097,
+    "compression_level": 9,
+    "format": "gzip-jsonl",
+    "gzip_mtime": 0,
+    "row_count": 50000,
+    "uncompressed_bytes": 53138589
+  }
+}

@@ -58,6 +58,9 @@ STOPWORDS = {
 }
 
 QUESTION_CANDIDATE_DEPTH = 80
+E5_ASSET_DIRECTORY = Path(__file__).resolve().parent / "assets"
+E5_PROJECTION_SIDECAR = E5_ASSET_DIRECTORY / "e5_intent_projection.jsonl.gz"
+E5_PROJECTION_MANIFEST = E5_ASSET_DIRECTORY / "e5_projection_manifest.json"
 
 NO_ADDITIONAL_OTHER_RE = re.compile(
     r"^\s*I don't have an additional preference for other\.\s*$",
@@ -263,26 +266,87 @@ class Agent:
         question_policy_config: QuestionPolicyConfig | None = None,
         projection_config: ProjectionConfig | None = None,
         reranking_config: RerankingConfig | None = None,
+        enable_e5: bool = True,
+        e5_projection_sidecar: str | Path | None = None,
+        e5_projection_manifest: str | Path | None = None,
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.explore_unseen = explore_unseen
-        # E4.1 remains a provisional experiment until true product-disjoint
-        # validation. Applying the patch therefore preserves full E4 by
-        # default; experiment tools pass the E4.1 candidate explicitly.
-        self.retrieval_config = retrieval_config or e4_fallback_config()
-        self.projection_config = projection_config or ProjectionConfig()
-        self.reranking_config = reranking_config or RerankingConfig()
-        self.question_policy_config = question_policy_config or QuestionPolicyConfig(
-            repeat_other_until_exhausted=self.projection_config.enabled,
+        explicit_variant_configuration = any(
+            config is not None
+            for config in (
+                retrieval_config,
+                question_policy_config,
+                projection_config,
+                reranking_config,
+            )
         )
+        self.e5_default_requested = enable_e5 and not explicit_variant_configuration
+
+        # The no-config constructor is the official evaluator seam. It now
+        # selects the promoted guarded E5 configuration. Historical experiment
+        # tools remain explicit and therefore retain their declared variants.
+        self.retrieval_config = retrieval_config or e4_fallback_config()
+        if not enable_e5:
+            self.projection_config = ProjectionConfig()
+            self.reranking_config = RerankingConfig()
+        elif self.e5_default_requested:
+            self.projection_config = ProjectionConfig(
+                enabled=True,
+                sidecar_path=str(e5_projection_sidecar or E5_PROJECTION_SIDECAR),
+                manifest_path=str(e5_projection_manifest or E5_PROJECTION_MANIFEST),
+                use_reranking=True,
+                use_question_rollout=False,
+                max_rerank_posterior_size=1,
+            )
+            self.reranking_config = RerankingConfig(
+                enabled=True,
+                enforce_projection_candidate_membership=True,
+                use_quality_tiebreak=False,
+            )
+        else:
+            self.projection_config = projection_config or ProjectionConfig()
+            self.reranking_config = reranking_config or RerankingConfig()
+
         self.connection = sqlite3.connect(":memory:")
         self._sessions: dict[str, SessionState] = {}
-        self.question_policy = AdaptiveQuestionPolicy(
-            config=self.question_policy_config,
-        )
         self._build_index()
         self.retriever = MultiRouteRetriever(self.connection, self.retrieval_config)
         self.projection_index = ProjectionIndex(self.catalog_path, self.projection_config)
+
+        # Projection and semantic reranking were promoted only as one guarded
+        # configuration. If the packaged projection assets fail strict
+        # validation, disable both components so the runtime is exact frozen
+        # E4 rather than the unvalidated semantic-only ablation.
+        if self.e5_default_requested and not self.projection_index.ready:
+            failure_reason = self.projection_index.status_reason
+            self.projection_config = ProjectionConfig()
+            self.reranking_config = RerankingConfig()
+            self.projection_index = ProjectionIndex(
+                self.catalog_path,
+                self.projection_config,
+            )
+            self.e5_default_active = False
+            self.e5_status_reason = f"fallback_to_frozen_e4:{failure_reason}"
+        elif self.e5_default_requested:
+            self.e5_default_active = True
+            self.e5_status_reason = "ready"
+        elif not enable_e5:
+            self.e5_default_active = False
+            self.e5_status_reason = "disabled_by_kill_switch"
+        else:
+            self.e5_default_active = False
+            self.e5_status_reason = "custom_configuration"
+
+        self.question_policy_config = question_policy_config or QuestionPolicyConfig(
+            repeat_other_until_exhausted=(
+                self.projection_config.enabled
+                and self.projection_config.use_question_rollout
+            ),
+        )
+        self.question_policy = AdaptiveQuestionPolicy(
+            config=self.question_policy_config,
+        )
         self.reranker = SemanticConstraintReranker(
             self.connection,
             self.reranking_config,
@@ -1050,6 +1114,9 @@ class Agent:
             "projection_enabled": self.projection_config.enabled,
             "projection_ready": self.projection_index.ready,
             "projection_status_reason": self.projection_index.status_reason,
+            "e5_default_requested": self.e5_default_requested,
+            "e5_default_active": self.e5_default_active,
+            "e5_status_reason": self.e5_status_reason,
             "semantic_reranking_enabled": self.reranking_config.enabled,
             "projection_template_confident": state.projection_template_confident,
             "question_candidate_ranking": "e3_frozen",
